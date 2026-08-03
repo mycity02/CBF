@@ -1,0 +1,56 @@
+# Python caches and build metadata
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+build/
+dist/
+
+# Local environments and editors
+.venv/
+venv/
+.idea/
+.vscode/
+
+# Logs and generated UI files
+*.log
+events.out.tfevents.*
+.gradio/
+gradio_tmp/
+
+# External source checkouts; install them as dependencies
+metadrive/
+scenarionet/
+
+# Scenario datasets and generated data
+Adv-BMT scenarios/
+Baseline Scenarios/
+generated_scenarios/
+
+# Model checkpoints and training outputs
+bmt/ckpt/
+TD3/
+td3_cl_rear_attack/
+td3_cl_rear_attack_topdown_test/
+td3_cl_scgen/
+td3_rear_attack_smoke/
+td3_waymo_native/
+*.ckpt
+*.pth
+*.pt
+*.zip
+*.pkl
+
+# Generated figures in the repository root
+/*.png
+
+# Experiment artifacts: keep only the paired v1 evidence listed below
+analysis_outputs/*
+!analysis_outputs/rta_diagnostics/
+analysis_outputs/rta_diagnostics/*
+!analysis_outputs/rta_diagnostics/paired_100_speed_comparison.md
+!analysis_outputs/rta_diagnostics/paired_100_speed_no_rta.json
+!analysis_outputs/rta_diagnostics/paired_100_speed_rta_v15_completion.json
+!analysis_outputs/rta_diagnostics/paired_100_speed_rta_v17_reward.json
