@@ -3,6 +3,7 @@ from typing import Any, Dict, List, Sequence, Tuple
 import numpy as np
 
 from bmt.runtime_assurance.cbf2d import TwoDimensionalCBF
+from bmt.runtime_assurance.fsm import FSMHOCBF
 from bmt.runtime_assurance.metadrive_plugin import MetaDriveCBFPlugin
 from bmt.runtime_assurance.types import CBFConfig, Control2D, RoadGeometry, VehicleState2D
 
@@ -116,3 +117,11 @@ class AdaptiveMetaDriveCBFPlugin(MetaDriveCBFPlugin):
         self._remember_velocities([ego_object, *vehicle_objects])
         self._episode_steps += 1
         return safe_action, telemetry
+
+class FSMHOCBFPlugin(MetaDriveCBFPlugin):
+    """FSM-supervised single-QP HOCBF adapter for MetaDrive evaluation."""
+
+    name = "fsm_hocbf_qp"
+
+    def _make_filter(self, config: CBFConfig) -> FSMHOCBF:
+        return FSMHOCBF(config)

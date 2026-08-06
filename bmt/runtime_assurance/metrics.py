@@ -7,6 +7,85 @@ LOW_SPEED_THRESHOLD_MPS = 1.0
 STOPPED_THRESHOLD_MPS = 0.1
 
 
+def termination_outcome(
+    arrive_dest: bool,
+    out_of_road: bool,
+    collision: bool,
+) -> str:
+    """Return an exclusive outcome using MetaDrive ScenarioEnv precedence."""
+
+    if arrive_dest:
+        return "success"
+    if out_of_road:
+        return "road_violation"
+    if collision:
+        return "collision"
+    return "timeout_or_other"
+
+
+def reference_route_length(env: Any) -> Optional[float]:
+    ego = getattr(env, "agent", None)
+    navigation = getattr(ego, "navigation", None)
+    trajectory = getattr(navigation, "reference_trajectory", None)
+    value = getattr(trajectory, "length", None)
+    if value is None:
+        return None
+    value = float(value)
+    return value if np.isfinite(value) else None
+
+
+def termination_summary(episodes: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
+    """Summarize exclusive outcomes and keep raw event flags separate."""
+
+    total = len(episodes)
+    counts = {
+        "success": 0,
+        "road_violation": 0,
+        "collision": 0,
+        "timeout_or_other": 0,
+    }
+    for episode in episodes:
+        outcome = str(episode["termination_reason"])
+        counts[outcome] = counts.get(outcome, 0) + 1
+
+    valid = [episode for episode in episodes if not episode["degenerate_scenario"]]
+
+    def rate(count: int, denominator: int = total) -> float:
+        return float(count) / denominator if denominator else 0.0
+
+    def valid_mean(key: str) -> float:
+        values = np.asarray(
+            [float(episode.get(key, 0.0)) for episode in valid],
+            dtype=float,
+        )
+        return float(values.mean()) if len(values) else 0.0
+
+    valid_road_events = sum(bool(episode["out_of_road"]) for episode in valid)
+    valid_road_terminations = sum(
+        episode["termination_reason"] == "road_violation" for episode in valid
+    )
+    degenerate_count = total - len(valid)
+    return {
+        "termination_counts": counts,
+        "success_termination_rate": rate(counts["success"]),
+        "road_violation_termination_rate": rate(counts["road_violation"]),
+        "collision_termination_rate": rate(counts["collision"]),
+        "timeout_or_other_rate": rate(counts["timeout_or_other"]),
+        "degenerate_scenario_count": degenerate_count,
+        "degenerate_scenario_rate": rate(degenerate_count),
+        "valid_dynamic_scenario_count": len(valid),
+        "valid_dynamic_reward": valid_mean("reward"),
+        "valid_dynamic_completion": valid_mean("route_completion"),
+        "valid_dynamic_collision_rate": valid_mean("collision"),
+        "valid_dynamic_arrive_dest_rate": valid_mean("arrive_dest"),
+        "valid_dynamic_out_of_road_rate": rate(valid_road_events, len(valid)),
+        "valid_dynamic_road_violation_termination_rate": rate(
+            valid_road_terminations,
+            len(valid),
+        ),
+    }
+
+
 def ego_position_2d(env: Any) -> Optional[np.ndarray]:
     ego = getattr(env, "agent", None)
     position = getattr(ego, "position", None)

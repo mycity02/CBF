@@ -10,6 +10,11 @@ from metadrive.policy.env_input_policy import EnvInputPolicy
 from metadrive.scenario.utils import get_number_of_scenarios
 
 from bmt.rl_train.train.customized_td3 import Closed_Loop_TD3, CustomizedTD3
+from bmt.runtime_assurance.metrics import (
+    reference_route_length,
+    termination_outcome,
+    termination_summary,
+)
 
 
 def build_eval_env(data_dir, horizon, start_index=0):
@@ -32,7 +37,7 @@ def build_eval_env(data_dir, horizon, start_index=0):
             reactive_traffic=False,
             no_static_vehicles=True,
             no_light=True,
-            crash_vehicle_done=False,
+            crash_vehicle_done=True,
             out_of_route_done=False,
             crash_object_done=False,
             crash_human_done=False,
@@ -84,6 +89,15 @@ def evaluate(model, env, num_episodes, start_index, num_scenarios, deterministic
         route_completion = float(scalar(last_info.get("route_completion"), 0.0))
         terminal_cost = float(scalar(last_info.get("cost"), 0.0))
         episode_reward = float(scalar(last_info.get("episode_reward"), total_reward))
+        arrive_dest = bool(last_info.get("arrive_dest", False))
+        out_of_road = bool(last_info.get("out_of_road", False))
+        route_length = reference_route_length(env)
+        degenerate_scenario = route_length is not None and route_length < 2.0
+        termination_reason = termination_outcome(
+            arrive_dest=arrive_dest,
+            out_of_road=out_of_road,
+            collision=collision,
+        )
         episode = {
             "episode": ep,
             "scenario_index": scenario_index,
@@ -95,8 +109,11 @@ def evaluate(model, env, num_episodes, start_index, num_scenarios, deterministic
             "cost_sum": cost_sum,
             "collision": collision,
             "crash": bool(last_info.get("crash", False)),
-            "out_of_road": bool(last_info.get("out_of_road", False)),
-            "arrive_dest": bool(last_info.get("arrive_dest", False)),
+            "out_of_road": out_of_road,
+            "arrive_dest": arrive_dest,
+            "termination_reason": termination_reason,
+            "reference_route_length": route_length,
+            "degenerate_scenario": degenerate_scenario,
         }
         episodes.append(episode)
         print(
@@ -128,6 +145,7 @@ def evaluate(model, env, num_episodes, start_index, num_scenarios, deterministic
         "terminal_crash_rate": float(crashes.mean()) if len(crashes) else 0.0,
         "out_of_road_rate": float(out_of_roads.mean()) if len(out_of_roads) else 0.0,
         "arrive_dest_rate": float(arrivals.mean()) if len(arrivals) else 0.0,
+        **termination_summary(episodes),
     }
     return summary, episodes
 

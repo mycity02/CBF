@@ -20,24 +20,35 @@ from bmt.runtime_assurance.metrics import (
     ego_speed_mps,
     latency_stats,
     motion_summary,
+    reference_route_length,
     speed_stats,
+    termination_outcome,
+    termination_summary,
 )
 
 
 def build_rta_plugin(name: str, config_path: Optional[str]):
     if name == "none":
         return None
-    if name != "predictive_escape_cbf2d":
-        raise ValueError(f"Unknown runtime-assurance plugin: {name}")
 
-    from bmt.runtime_assurance.adaptive_plugin import AdaptiveMetaDriveCBFPlugin
+    from bmt.runtime_assurance.adaptive_plugin import (
+        AdaptiveMetaDriveCBFPlugin,
+        FSMHOCBFPlugin,
+    )
     from bmt.runtime_assurance.types import CBFConfig
+
+    plugin_types = {
+        "fsm_hocbf_qp": FSMHOCBFPlugin,
+        "predictive_escape_cbf2d": AdaptiveMetaDriveCBFPlugin,
+    }
+    if name not in plugin_types:
+        raise ValueError(f"Unknown runtime-assurance plugin: {name}")
 
     values: Dict[str, Any] = {}
     if config_path:
         with open(Path(config_path).resolve(), "r", encoding="utf-8") as stream:
             values = json.load(stream)
-    return AdaptiveMetaDriveCBFPlugin(CBFConfig.from_mapping(values))
+    return plugin_types[name](CBFConfig.from_mapping(values))
 
 
 def evaluate(
@@ -72,6 +83,8 @@ def evaluate(
         min_vehicle_h = None
         min_road_h = None
         mode_counts = Counter()
+        qp_solves = 0
+        fsm_transitions = 0
 
         episode_speeds_mps = []
         episode_latencies_ms = []
@@ -90,6 +103,8 @@ def evaluate(
                 interventions += int(bool(rta_info["rta_intervened"]))
                 infeasible_steps += int(not bool(rta_info["rta_hard_feasible"]))
                 mode_counts[str(rta_info["rta_mode"])] += 1
+                qp_solves += int(rta_info.get("rta_qp_solve_count", 0))
+                fsm_transitions += int(bool(rta_info.get("rta_fsm_transitioned", False)))
                 min_vehicle_h = _running_min(min_vehicle_h, rta_info["rta_min_vehicle_h"])
                 min_road_h = _running_min(min_road_h, rta_info["rta_min_road_h"])
 
@@ -115,6 +130,14 @@ def evaluate(
         duration_seconds = steps * step_seconds
         episode_speed = speed_stats(episode_speeds_mps)
         arrive_dest = bool(last_info.get("arrive_dest", False))
+        out_of_road = bool(last_info.get("out_of_road", False))
+        route_length = reference_route_length(env)
+        degenerate_scenario = route_length is not None and route_length < 2.0
+        termination_reason = termination_outcome(
+            arrive_dest=arrive_dest,
+            out_of_road=out_of_road,
+            collision=collision,
+        )
         episode = {
             "episode": episode_index,
             "scenario_index": scenario_index,
@@ -127,8 +150,11 @@ def evaluate(
             "collision": collision,
             "collision_source": collision_source,
             "crash": bool(last_info.get("crash", False)),
-            "out_of_road": bool(last_info.get("out_of_road", False)),
+            "out_of_road": out_of_road,
             "arrive_dest": arrive_dest,
+            "termination_reason": termination_reason,
+            "reference_route_length": route_length,
+            "degenerate_scenario": degenerate_scenario,
             "control_step_seconds": step_seconds,
             "episode_duration_seconds": duration_seconds,
             "arrival_time_seconds": duration_seconds if arrive_dest else None,
@@ -144,6 +170,8 @@ def evaluate(
                     "rta_min_vehicle_h": min_vehicle_h,
                     "rta_min_road_h": min_road_h,
                     "rta_mode_counts": dict(mode_counts),
+                    "rta_qp_solves": qp_solves,
+                    "rta_fsm_transitions": fsm_transitions,
                     **latency_stats(
                         episode_latencies_ms,
                         deadline_ms=1000.0 * step_seconds,
@@ -195,6 +223,7 @@ def _summarize(
         "rta_enabled": rta_enabled,
         "control_step_seconds": step_seconds,
         **motion_summary(episodes, speed_samples_mps or []),
+        **termination_summary(episodes),
     }
     if rta_enabled:
         summary.update(
@@ -202,6 +231,8 @@ def _summarize(
                 "rta_avg_interventions": mean("rta_interventions"),
                 "rta_intervention_rate": mean("rta_intervention_rate"),
                 "rta_avg_infeasible_steps": mean("rta_infeasible_steps"),
+                "rta_avg_qp_solves": mean("rta_qp_solves"),
+                "rta_avg_fsm_transitions": mean("rta_fsm_transitions"),
                 **latency_stats(
                     rta_latency_samples_ms or [],
                     deadline_ms=deadline_ms,
@@ -260,8 +291,8 @@ def main():
     parser.add_argument("--stochastic", action="store_true")
     parser.add_argument(
         "--rta_plugin",
-        choices=["none", "predictive_escape_cbf2d"],
-        default="predictive_escape_cbf2d",
+        choices=["none", "fsm_hocbf_qp", "predictive_escape_cbf2d"],
+        default="fsm_hocbf_qp",
     )
     parser.add_argument("--rta_config", default=None, help="Optional JSON override for CBFConfig")
     parser.add_argument("--out", default=None, help="Optional JSON result path")

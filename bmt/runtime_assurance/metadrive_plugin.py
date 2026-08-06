@@ -19,7 +19,7 @@ class MetaDriveCBFPlugin:
 
     def __init__(self, config: Optional[CBFConfig] = None):
         self.config = config or CBFConfig()
-        self.filter = TwoDimensionalCBF(self.config)
+        self.filter = self._make_filter(self.config)
         self._last_velocities: Dict[str, np.ndarray] = {}
         self._episode_steps = 0
         self._road_geometry_source = "reference_route"
@@ -32,6 +32,9 @@ class MetaDriveCBFPlugin:
         ego = self._ego_vehicle(env)
         self._last_velocities[str(ego.name)] = np.asarray(ego.velocity, dtype=float)[:2].copy()
         self._episode_steps = 0
+        reset_filter = getattr(self.filter, "reset", None)
+        if callable(reset_filter):
+            reset_filter()
 
     def filter_action(
         self,
@@ -57,7 +60,7 @@ class MetaDriveCBFPlugin:
         )
         runtime_config = self._runtime_config(actual_max_curvature, ego_object)
         if self.filter.config != runtime_config:
-            self.filter = TwoDimensionalCBF(runtime_config)
+            self.filter = self._make_filter(runtime_config)
 
         result = self.filter.filter(
             nominal_control=nominal_control,
@@ -88,6 +91,9 @@ class MetaDriveCBFPlugin:
 
     def describe(self) -> Dict[str, Any]:
         return {"name": self.name, "config": self.config.to_dict()}
+
+    def _make_filter(self, config: CBFConfig) -> TwoDimensionalCBF:
+        return TwoDimensionalCBF(config)
 
     def _runtime_config(self, actual_max_curvature: float, ego_object: Any = None) -> CBFConfig:
         return replace(
@@ -133,11 +139,17 @@ class MetaDriveCBFPlugin:
         left, right = self._side_detector_clearances(ego, heading)
         if left is None and right is None:
             return reference_geometry
-        self._road_geometry_source = "side_detector"
+        self._road_geometry_source = "reference_route+side_detector"
         return RoadGeometry(
             heading=heading,
-            left_clearance=left,
-            right_clearance=right,
+            left_clearance=_minimum_clearance(
+                reference_geometry.left_clearance,
+                left,
+            ),
+            right_clearance=_minimum_clearance(
+                reference_geometry.right_clearance,
+                right,
+            ),
         )
 
     @staticmethod
@@ -290,6 +302,16 @@ class MetaDriveCBFPlugin:
         for vehicle in vehicles:
             current[str(vehicle.name)] = np.asarray(vehicle.velocity, dtype=float)[:2].copy()
         self._last_velocities = current
+
+
+def _minimum_clearance(
+    reference: Optional[float],
+    detected: Optional[float],
+) -> Optional[float]:
+    """Fuse route and physical-line clearances without relaxing either one."""
+
+    values = [value for value in (reference, detected) if value is not None]
+    return min(values) if values else None
 
 
 def _finite_or_none(value: Any) -> Optional[float]:

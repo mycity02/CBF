@@ -4,8 +4,16 @@ import numpy as np
 
 from bmt.runtime_assurance.adaptive_plugin import (
     AdaptiveMetaDriveCBFPlugin,
+    FSMHOCBFPlugin,
     PredictiveEscapeCBF,
 )
+from bmt.runtime_assurance.fsm import (
+    FSMHOCBF,
+    FSMState,
+    SafetySupervisorFSM,
+    ThreatAssessment,
+)
+from bmt.runtime_assurance.metrics import termination_outcome, termination_summary
 from bmt.runtime_assurance.qp import (
     LinearConstraint,
     solve_prioritized_projection,
@@ -212,7 +220,7 @@ def test_low_speed_recovery_bypasses_only_an_initially_tight_road_margin():
         nominal_control=nominal,
         ego=vehicle("ego", 0.0, 0.0, 0.3, heading=0.06),
         obstacles=[],
-        road=RoadGeometry(heading=0.0, left_clearance=1.0, right_clearance=3.0),
+        road=RoadGeometry(heading=0.0, left_clearance=1.15, right_clearance=3.0),
     )
 
     assert result.mode == "nominal"
@@ -270,7 +278,7 @@ def test_low_speed_recovery_accepts_heading_away_from_the_tight_boundary():
         nominal_control=Control2D(3.0, -0.1),
         ego=vehicle("ego", 0.0, 0.0, 0.3, heading=-0.06),
         obstacles=[],
-        road=RoadGeometry(heading=0.0, left_clearance=1.0, right_clearance=3.0),
+        road=RoadGeometry(heading=0.0, left_clearance=1.15, right_clearance=3.0),
     )
 
     assert result.fallback_mode == "low_speed_road_recovery"
@@ -354,8 +362,32 @@ def test_metadrive_adapter_uses_side_detector_road_boundaries():
 
     road = plugin._road_geometry(ego)
 
-    assert plugin._road_geometry_source == "side_detector"
+    assert plugin._road_geometry_source == "reference_route+side_detector"
     np.testing.assert_allclose(road.left_clearance, 2.0, atol=1e-9)
+    np.testing.assert_allclose(road.right_clearance, 3.0, atol=1e-9)
+
+
+def test_metadrive_adapter_side_detector_never_relaxes_reference_route():
+    ego = _FakeVehicle("ego", [0.0, 0.0], [0.0, 0.0])
+    ego.dist_to_left_side = 1.0
+    ego.dist_to_right_side = 3.0
+    ego.config = {
+        "side_detector": {
+            "num_lasers": 4,
+            "distance": 50.0,
+        }
+    }
+    ego.side_detector = _FakeSideDetector([0.20, 1.0, 0.20, 1.0])
+    ego.engine = SimpleNamespace(
+        physics_world=SimpleNamespace(static_world=object())
+    )
+    plugin = AdaptiveMetaDriveCBFPlugin(
+        CBFConfig(road_use_side_detector=True)
+    )
+
+    road = plugin._road_geometry(ego)
+
+    np.testing.assert_allclose(road.left_clearance, 1.0, atol=1e-9)
     np.testing.assert_allclose(road.right_clearance, 3.0, atol=1e-9)
 
 
@@ -381,3 +413,345 @@ class _FakeVehicle:
         self.dist_to_left_side = 5.0
         self.dist_to_right_side = 5.0
         self.navigation = SimpleNamespace(current_heading_theta_at_long=0.0)
+
+def test_fsm_squeeze_selects_one_persistent_mode_and_solves_one_qp():
+    cbf = FSMHOCBF(
+        CBFConfig(
+            other_accel_uncertainty=0.0,
+            passthrough_without_active_obstacle=True,
+        )
+    )
+    result = cbf.filter(
+        nominal_control=Control2D(0.0, 0.0),
+        ego=vehicle("ego", 0.0, 0.0, 10.0),
+        obstacles=[
+            vehicle("rear", -10.0, 0.0, 15.0),
+            vehicle("front", 10.0, 0.0, 8.0),
+        ],
+        road=RoadGeometry(heading=0.0, left_clearance=5.0, right_clearance=5.0),
+    )
+
+    assert result.mode in {"escape_left", "escape_right"}
+    assert result.qp_solve_count == 1
+    assert result.candidate_scores == {}
+    assert result.reference_control is not None
+    assert abs(result.reference_control.curvature) > 1e-3
+
+
+def test_fsm_uses_side_margin_to_select_the_open_escape_corridor():
+    cbf = FSMHOCBF(CBFConfig(other_accel_uncertainty=0.0))
+    result = cbf.filter(
+        nominal_control=Control2D(0.0, 0.0),
+        ego=vehicle("ego", 0.0, 0.0, 10.0),
+        obstacles=[
+            vehicle("rear", -10.0, 0.0, 15.0),
+            vehicle("left", 0.0, 3.5, 10.0),
+        ],
+        road=RoadGeometry(heading=0.0, left_clearance=6.0, right_clearance=6.0),
+    )
+
+    assert result.mode == "escape_right"
+    assert result.reference_control.curvature < 0.0
+    assert result.fsm_right_margin > result.fsm_left_margin
+
+
+def test_fsm_dwell_prevents_left_right_chattering():
+    supervisor = SafetySupervisorFSM(
+        CBFConfig(fsm_min_dwell_steps=3, fsm_direction_hysteresis=0.0)
+    )
+    left_preferred = ThreatAssessment(
+        front_threat=False,
+        rear_threat=True,
+        front_clear=True,
+        rear_clear=False,
+        left_margin=1.0,
+        right_margin=0.2,
+    )
+    right_preferred = ThreatAssessment(
+        front_threat=False,
+        rear_threat=True,
+        front_clear=True,
+        rear_clear=False,
+        left_margin=0.2,
+        right_margin=1.0,
+    )
+
+    first = supervisor.update(left_preferred, nominal_curvature=0.0)
+    second = supervisor.update(right_preferred, nominal_curvature=0.0)
+
+    assert first.state is FSMState.ESCAPE_LEFT
+    assert second.state is FSMState.ESCAPE_LEFT
+    assert not second.transitioned
+
+
+def test_fsm_clear_hysteresis_passes_through_recovery_before_nominal():
+    supervisor = SafetySupervisorFSM(
+        CBFConfig(
+            fsm_min_dwell_steps=0,
+            fsm_clear_steps=2,
+            fsm_recovery_steps=2,
+        )
+    )
+    threat = ThreatAssessment(False, True, True, False, 1.0, 1.0)
+    clear = ThreatAssessment(False, False, True, True, 1.0, 1.0)
+
+    assert supervisor.update(threat, 0.0).state is FSMState.ESCAPE_LEFT
+    assert supervisor.update(clear, 0.0).state is FSMState.ESCAPE_LEFT
+    assert supervisor.update(clear, 0.0).state is FSMState.RECOVERY
+    assert supervisor.update(clear, 0.0).state is FSMState.RECOVERY
+    assert supervisor.update(clear, 0.0).state is FSMState.NOMINAL
+
+
+def test_fsm_metadrive_plugin_reports_state_and_single_qp():
+    ego = _FakeVehicle("ego", [0.0, 0.0], [10.0, 0.0])
+    rear = _FakeVehicle("rear", [-10.0, 0.0], [15.0, 0.0])
+    env = SimpleNamespace(
+        agent=ego,
+        engine=SimpleNamespace(traffic_manager=SimpleNamespace(vehicles=[ego, rear])),
+    )
+    plugin = FSMHOCBFPlugin(CBFConfig(other_accel_uncertainty=0.0))
+    plugin.reset(env)
+
+    safe_action, telemetry = plugin.filter_action(env, np.asarray([0.0, 0.0]))
+
+    assert safe_action.shape == (2,)
+    assert telemetry["rta_plugin"] == "fsm_hocbf_qp"
+    assert telemetry["rta_mode"] in {"escape_left", "escape_right"}
+    assert telemetry["rta_fsm_transitioned"]
+    assert telemetry["rta_qp_solve_count"] == 1
+    assert telemetry["rta_candidate_scores"] == {}
+
+
+def test_fsm_nominal_passthrough_still_reports_current_road_barriers():
+    cbf = FSMHOCBF(
+        CBFConfig(
+            passthrough_without_active_obstacle=True,
+            road_low_speed_passthrough=0.0,
+        )
+    )
+
+    result = cbf.filter(
+        nominal_control=Control2D(0.0, 0.0),
+        ego=vehicle("ego", 0.0, 0.0, 10.0),
+        obstacles=[],
+        road=RoadGeometry(heading=0.0, left_clearance=5.0, right_clearance=5.0),
+    )
+
+    assert result.qp_solve_count == 0
+    assert not result.intervened
+    assert len([item for item in result.diagnostics if item.kind == "road"]) == 2
+    assert result.to_telemetry()["rta_min_road_h"] is not None
+
+def test_fsm_far_from_road_boundary_does_not_filter_an_outward_nominal_action():
+    cbf = FSMHOCBF(
+        CBFConfig(
+            passthrough_without_active_obstacle=True,
+            road_low_speed_passthrough=0.0,
+            road_activation_h=0.5,
+            road_activation_psi1=0.0,
+        )
+    )
+    nominal = Control2D(0.0, 0.3)
+
+    result = cbf.filter(
+        nominal_control=nominal,
+        ego=vehicle("ego", 0.0, 0.0, 10.0),
+        obstacles=[],
+        road=RoadGeometry(heading=0.0, left_clearance=5.0, right_clearance=5.0),
+    )
+
+    assert result.qp_solve_count == 0
+    np.testing.assert_allclose(result.control.as_array(), nominal.as_array())
+
+
+def test_fsm_nominal_passthrough_cannot_bypass_an_unsafe_road_constraint():
+    cbf = FSMHOCBF(
+        CBFConfig(
+            passthrough_without_active_obstacle=True,
+            road_low_speed_passthrough=0.0,
+        )
+    )
+
+    result = cbf.filter(
+        nominal_control=Control2D(0.0, 0.0),
+        ego=vehicle("ego", 0.0, 0.0, 10.0),
+        obstacles=[],
+        road=RoadGeometry(heading=0.0, left_clearance=1.1, right_clearance=5.0),
+    )
+
+    assert result.qp_solve_count == 1
+    assert result.intervened
+    assert result.control.curvature < 0.0
+    assert result.to_telemetry()["rta_min_road_h"] < 0.0
+
+
+def test_road_barrier_uses_heading_dependent_vehicle_footprint():
+    cbf = FSMHOCBF(CBFConfig(road_margin=0.05))
+    ego = vehicle("ego", 0.0, 0.0, 10.0, heading=np.pi / 6.0)
+
+    barriers = cbf._road_barriers(
+        ego,
+        RoadGeometry(heading=0.0, left_clearance=2.0, right_clearance=5.0),
+    )
+
+    left = next(item for item in barriers if item.diagnostic.name == "road:left")
+    expected_extent = 0.5 * ego.length * np.sin(np.pi / 6.0) + 0.5 * ego.width * np.cos(
+        np.pi / 6.0
+    )
+    assert np.isclose(left.diagnostic.h, 2.0 - expected_extent - 0.05)
+    assert left.diagnostic.h < 0.0
+
+
+def test_fsm_rear_threat_does_not_wait_for_full_lateral_overlap():
+    cbf = FSMHOCBF(CBFConfig(other_accel_uncertainty=0.0))
+    road = RoadGeometry(heading=0.0, left_clearance=6.0, right_clearance=6.0)
+    ego = vehicle("ego", 0.0, 0.0, 10.0)
+    offset_rear = vehicle("offset_rear", -2.0, 2.6, 12.0)
+
+    assert not cbf._current_lateral_overlap(ego, offset_rear, road)
+    result = cbf.filter(
+        nominal_control=Control2D(0.0, 0.0),
+        ego=ego,
+        obstacles=[offset_rear],
+        road=road,
+    )
+
+    assert result.mode == "escape_right"
+    assert result.transition_reason.startswith("rear_threat")
+
+
+def test_fsm_escape_reference_is_current_state_feedback_without_a_horizon():
+    cbf = FSMHOCBF(CBFConfig())
+    road = RoadGeometry(heading=0.0, left_clearance=5.0, right_clearance=5.0)
+
+    entering = cbf._reference_for_state(
+        FSMState.ESCAPE_LEFT,
+        Control2D(0.0, 0.0),
+        vehicle("ego", 0.0, 0.0, 10.0, heading=0.0),
+        road,
+    )
+    correcting = cbf._reference_for_state(
+        FSMState.ESCAPE_LEFT,
+        Control2D(0.0, 0.0),
+        vehicle("ego", 0.0, 0.0, 10.0, heading=0.3),
+        road,
+    )
+
+    assert entering.curvature > 0.0
+    assert correcting.curvature < 0.0
+    assert not hasattr(cbf.config, "fsm_maneuver_horizon")
+
+
+def test_termination_summary_separates_events_from_exclusive_outcomes():
+    episodes = [
+        {
+            "termination_reason": termination_outcome(True, True, False),
+            "out_of_road": True,
+            "degenerate_scenario": False,
+        },
+        {
+            "termination_reason": termination_outcome(False, True, False),
+            "out_of_road": True,
+            "degenerate_scenario": False,
+        },
+        {
+            "termination_reason": termination_outcome(False, False, True),
+            "out_of_road": False,
+            "degenerate_scenario": False,
+        },
+        {
+            "termination_reason": termination_outcome(False, False, False),
+            "out_of_road": False,
+            "degenerate_scenario": False,
+        },
+        {
+            "termination_reason": termination_outcome(True, True, False),
+            "out_of_road": True,
+            "degenerate_scenario": True,
+        },
+    ]
+
+    for index, episode in enumerate(episodes):
+        episode["reward"] = float(index)
+        episode["route_completion"] = 0.1 * index
+        episode["collision"] = index == 2
+        episode["arrive_dest"] = index in (0, 4)
+
+    summary = termination_summary(episodes)
+
+    assert summary["termination_counts"] == {
+        "success": 2,
+        "road_violation": 1,
+        "collision": 1,
+        "timeout_or_other": 1,
+    }
+    assert summary["degenerate_scenario_count"] == 1
+    assert summary["valid_dynamic_out_of_road_rate"] == 0.5
+    assert summary["valid_dynamic_road_violation_termination_rate"] == 0.25
+    assert summary["valid_dynamic_reward"] == 1.5
+    assert np.isclose(summary["valid_dynamic_completion"], 0.15)
+    assert summary["valid_dynamic_collision_rate"] == 0.25
+    assert summary["valid_dynamic_arrive_dest_rate"] == 0.25
+
+
+def test_fsm_front_uses_open_escape_corridor_before_braking():
+    supervisor = SafetySupervisorFSM(
+        CBFConfig(
+            fsm_min_side_margin=0.0,
+            fsm_front_escape_enabled=True,
+            fsm_front_escape_min_margin=0.2,
+        )
+    )
+    front_only = ThreatAssessment(True, False, False, True, 1.0, 0.5)
+
+    decision = supervisor.update(front_only, nominal_curvature=0.0)
+
+    assert decision.state is FSMState.ESCAPE_LEFT
+    assert decision.reason == "front_threat_left_margin"
+
+
+def test_fsm_front_brakes_when_no_safe_corridor_then_escapes_from_rear_threat():
+    supervisor = SafetySupervisorFSM(
+        CBFConfig(
+            fsm_min_side_margin=0.0,
+            fsm_front_escape_enabled=True,
+            fsm_front_escape_min_margin=0.2,
+        )
+    )
+    front_only = ThreatAssessment(True, False, False, True, 0.1, 0.1)
+    squeeze = ThreatAssessment(True, True, False, False, 1.0, 0.5)
+
+    braking = supervisor.update(front_only, nominal_curvature=0.0)
+    escaping = supervisor.update(squeeze, nominal_curvature=0.0)
+
+    assert braking.state is FSMState.BRAKE
+    assert escaping.state is FSMState.ESCAPE_LEFT
+
+
+def test_fsm_adaptive_brake_scales_with_current_front_risk_and_releases():
+    cbf = FSMHOCBF(
+        CBFConfig(
+            fsm_enter_h=0.8,
+            fsm_enter_psi1=0.5,
+            fsm_brake_acceleration=-2.0,
+        )
+    )
+    mild = ThreatAssessment(
+        True, False, False, True, 0.0, 0.0, front_h=0.6, front_psi1=0.5
+    )
+    severe = ThreatAssessment(
+        True, False, False, True, 0.0, 0.0, front_h=0.0, front_psi1=0.5
+    )
+    hysteresis_only = ThreatAssessment(
+        False, False, False, True, 0.0, 0.0, front_h=0.9, front_psi1=0.7
+    )
+
+    assert np.isclose(cbf._adaptive_brake_acceleration(1.0, mild), -0.5)
+    assert np.isclose(cbf._adaptive_brake_acceleration(1.0, severe), -2.0)
+    assert np.isclose(cbf._adaptive_brake_acceleration(1.0, hysteresis_only), 1.0)
+
+    threshold = ThreatAssessment(
+        True, False, False, True, 0.0, 0.0, front_h=0.8, front_psi1=0.5
+    )
+    cbf.supervisor.state_age_steps = 30
+    assert np.isclose(cbf._adaptive_brake_acceleration(1.0, threshold), -2.0)

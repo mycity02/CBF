@@ -106,6 +106,7 @@ class TwoDimensionalCBF:
                 preview_score=preview_margin,
                 diagnostics=[],
                 candidate_scores={"nominal": preview_margin},
+                qp_solve_count=0,
             )
         barriers = self._build_barriers(ego=ego, obstacles=active_obstacles, road=road)
         constraints = [item.constraint for item in barriers]
@@ -205,6 +206,7 @@ class TwoDimensionalCBF:
             preview_score=preview_margin,
             diagnostics=diagnostics,
             candidate_scores=candidate_scores,
+            qp_solve_count=len(references),
         )
 
 
@@ -338,15 +340,19 @@ class TwoDimensionalCBF:
         ego: VehicleState2D,
         road: RoadGeometry,
     ) -> bool:
-        half_width = 0.5 * ego.width
+        lateral_extent = _projected_half_extents(
+            ego,
+            road.tangent,
+            road.left_normal,
+        )[1]
         boundary_margins = []
         if road.left_clearance is not None and np.isfinite(road.left_clearance):
             boundary_margins.append(
-                (float(road.left_clearance) - half_width, road.left_normal)
+                (float(road.left_clearance) - lateral_extent, road.left_normal)
             )
         if road.right_clearance is not None and np.isfinite(road.right_clearance):
             boundary_margins.append(
-                (float(road.right_clearance) - half_width, -road.left_normal)
+                (float(road.right_clearance) - lateral_extent, -road.left_normal)
             )
         if not boundary_margins:
             return False
@@ -543,13 +549,17 @@ class TwoDimensionalCBF:
     def _road_barriers(self, ego: VehicleState2D, road: RoadGeometry) -> List[_Barrier]:
         ret: List[_Barrier] = []
         normal = road.left_normal
-        half_width = ego.width / 2.0
+        lateral_extent = _projected_half_extents(
+            ego,
+            road.tangent,
+            road.left_normal,
+        )[1]
 
         if road.left_clearance is not None and np.isfinite(road.left_clearance):
             ret.append(
                 self._linear_position_barrier(
                     name="road:left",
-                    h=float(road.left_clearance - half_width - self.config.road_margin),
+                    h=float(road.left_clearance - lateral_extent - self.config.road_margin),
                     safe_gradient=-normal,
                     ego=ego,
                 )
@@ -558,7 +568,7 @@ class TwoDimensionalCBF:
             ret.append(
                 self._linear_position_barrier(
                     name="road:right",
-                    h=float(road.right_clearance - half_width - self.config.road_margin),
+                    h=float(road.right_clearance - lateral_extent - self.config.road_margin),
                     safe_gradient=normal,
                     ego=ego,
                 )
