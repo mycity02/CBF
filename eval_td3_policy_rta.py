@@ -82,7 +82,10 @@ def evaluate(
         infeasible_steps = 0
         min_vehicle_h = None
         min_road_h = None
+        min_effective_road_h = None
         mode_counts = Counter()
+        fallback_counts = Counter()
+        nominal_road_violation_steps = 0
         qp_solves = 0
         fsm_transitions = 0
 
@@ -103,10 +106,20 @@ def evaluate(
                 interventions += int(bool(rta_info["rta_intervened"]))
                 infeasible_steps += int(not bool(rta_info["rta_hard_feasible"]))
                 mode_counts[str(rta_info["rta_mode"])] += 1
+                fallback_mode = str(rta_info.get("rta_fallback_mode", "none"))
+                fallback_counts[fallback_mode] += 1
                 qp_solves += int(rta_info.get("rta_qp_solve_count", 0))
                 fsm_transitions += int(bool(rta_info.get("rta_fsm_transitioned", False)))
                 min_vehicle_h = _running_min(min_vehicle_h, rta_info["rta_min_vehicle_h"])
                 min_road_h = _running_min(min_road_h, rta_info["rta_min_road_h"])
+                min_effective_road_h = _running_min(
+                    min_effective_road_h,
+                    rta_info.get("rta_min_effective_road_h"),
+                )
+                nominal_road_h = rta_info.get("rta_min_road_h")
+                nominal_road_violation_steps += int(
+                    nominal_road_h is not None and float(nominal_road_h) < 0.0
+                )
 
             observation, reward, terminated, truncated, info = env.step(action)
             done = bool(terminated or truncated)
@@ -169,7 +182,15 @@ def evaluate(
                     "rta_infeasible_steps": infeasible_steps,
                     "rta_min_vehicle_h": min_vehicle_h,
                     "rta_min_road_h": min_road_h,
+                    "rta_min_effective_road_h": min_effective_road_h,
                     "rta_mode_counts": dict(mode_counts),
+                    "rta_fallback_counts": dict(fallback_counts),
+                    "rta_nominal_road_violation_steps": (
+                        nominal_road_violation_steps
+                    ),
+                    "rta_nominal_road_violation_rate": (
+                        nominal_road_violation_steps / max(steps, 1)
+                    ),
                     "rta_qp_solves": qp_solves,
                     "rta_fsm_transitions": fsm_transitions,
                     **latency_stats(
@@ -226,11 +247,28 @@ def _summarize(
         **termination_summary(episodes),
     }
     if rta_enabled:
+        fallback_counts = Counter()
+        for item in episodes:
+            fallback_counts.update(item.get("rta_fallback_counts", {}))
+        total_steps = sum(int(item["episode_length"]) for item in episodes)
+        total_infeasible_steps = sum(
+            int(item["rta_infeasible_steps"]) for item in episodes
+        )
+        total_nominal_road_violation_steps = sum(
+            int(item["rta_nominal_road_violation_steps"]) for item in episodes
+        )
         summary.update(
             {
                 "rta_avg_interventions": mean("rta_interventions"),
                 "rta_intervention_rate": mean("rta_intervention_rate"),
                 "rta_avg_infeasible_steps": mean("rta_infeasible_steps"),
+                "rta_hard_infeasible_step_rate": (
+                    total_infeasible_steps / max(total_steps, 1)
+                ),
+                "rta_nominal_road_violation_step_rate": (
+                    total_nominal_road_violation_steps / max(total_steps, 1)
+                ),
+                "rta_fallback_counts": dict(fallback_counts),
                 "rta_avg_qp_solves": mean("rta_qp_solves"),
                 "rta_avg_fsm_transitions": mean("rta_fsm_transitions"),
                 **latency_stats(

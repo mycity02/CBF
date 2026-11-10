@@ -223,3 +223,85 @@ python -m pytest tests\test_runtime_assurance_cbf2d.py `
 - 当前没有使用 CLF、MPC、HJ/CBVF 或学习式安全价值函数；
 - HOCBF 约束不可行时仍需分级松弛，不能对任意初始状态承诺无碰撞；
 - 正式论文还需要多随机种子、置信区间、参数敏感性以及 FSM/v17 枚举、一维/二维、道路约束触发策略等消融实验。
+
+## 9. 追尾场景时间窗试验
+
+生成入口新增 `--attack_time`，按固定 0.1 s 回放时钟指定后向接触目标时刻，并要求与模型的 5 帧时间步长对齐。例如 `--attack_time 3.0` 将目标设在第 30 帧；不传该参数时仍使用自车最后有效帧。生成时只截断攻击车的反向生成有效区间，不截断自车参考路线和背景交通。
+
+早于场景末端的接触目标之后，攻击车按目标时刻的速度、航向继续运动，避免在目标处消失。这段轨迹是显式的恒速延续，不属于模型生成，也不是在线追击；该区别记录在 `metadata.rear_attack.post_anchor_motion` 中。时间试验仍以原始记录的自车轨迹设置目标，尚未进行 TD3 轨迹对齐。
+
+```powershell
+python bmt/ADV-BMT_rear_attack_dataset_generate.py `
+  --dir "Baseline Scenarios/scenarionet_waymo_training_500" `
+  --num_scenario 100 --attack_time 3.0 --seed 0 `
+  --save_dir "Adv-BMT scenarios/my_rear_attack_3s"
+
+python eval_rear_attack_timing.py `
+  --eval_data_dir "Adv-BMT scenarios/my_rear_attack_3s" `
+  --ckpt_path "td3_waymo_native/seed_0_300000_steps.zip" `
+  --num_episodes 100 --rta_plugin none `
+  --out "analysis_outputs/rta_diagnostics/my_rear_attack_3s_none.json"
+```
+
+生成脚本和审计入口均拒绝覆盖已有输出。`--start_index` 可用于分段生成；`--seed` 固定一次生成调用的随机种子。时间审计沿用原评估环境及终止配置，额外按 `new_adv_id` 跟踪攻击车，并记录：
+
+- 后车是否实际出现、回合是否覆盖到预设目标帧；
+- 是否出现后向接近，以及横向车身投影重叠、后向间隙和接近速度计算得到的 TTC；
+- 后向 TTC 不大于 3 s 的威胁是否出现、首次出现在哪一帧；
+- 按指定攻击车 ID 进行 Bullet 接触查询的结果及接触方向。
+
+该接触审计与原先 `collision_source` 的最近车辆方向标签分开保存。TTC 是当前相对运动的局部指标，不是轨迹预测，也不等于必然碰撞。RTA 成功使车辆提前横向分离时，后向威胁次数可能减少；因此两组威胁次数不能单独作为攻击场景有效性的筛选条件。
+
+时间锚点回归测试：
+
+```powershell
+python -m unittest discover -s tests -p test_rear_attack_timing.py -v
+```
+
+2026-11-10 时间窗试验采用同一批 100 个源场景，分别重新生成 9 s 对照和 3 s 提前攻击版本。每组均保留 26 个退化路线场景，并单列 74 个有效动态场景口径；RTA 配置和 TD3 检查点保持一致。
+
+| 指标 | 9 s，无 RTA | 3 s，无 RTA | 3 s，FSM–HOCBF-QP |
+|---|---:|---:|---:|
+| 有效动态场景中出现后向 TTC≤3 s | 3/74 | 19/74 | 21/74 |
+| 覆盖预设接触目标帧 | 0/100 | 40/100 | 49/100 |
+| 指定攻击车的后向接触场景数 | 0 | 6 | 4 |
+| 全场景碰撞事件率 | 14% | 26% | 9% |
+| 全场景到达率 | 65% | 55% | 80% |
+| 平均速度 | 11.520 m/s | 10.714 m/s | 9.794 m/s |
+
+3 s 版本中，无 RTA 的后向接触场景编号为 9、10、47、55、75、95；RTA 的后向接触场景编号为 40、65、77、81。后向接触净减少 2 个，但产生了 4 个新的后向接触场景，不能表述为已经解决后向防护问题。RTA 下威胁覆盖次数增加也可能来自回合存活更久或驾驶轨迹变化，不能将其直接当作性能退化指标。
+
+结果位于 `analysis_outputs/rta_diagnostics/timing_trial_comparison_100.json`，完整逐帧审计位于对应的 `timing_*_100.json`。场景位于 `Adv-BMT scenarios/rear_attack_timing_3s_trial_100` 和 `rear_attack_timing_9s_control_100`。这两组是新的开发试验数据，不能与此前 `rear_attack_eval_100` 的结果逐数字混用。生成调用按源索引 0–9、10–96、97–99 分为三段，各段种子均为 0；汇总文件记录了该协议、控制器配置快照和模型哈希。
+
+## 10. 实际后向碰撞专项场景
+
+`mine_rear_collision_scenarios.py` 用固定 TD3 在原生场景中的无 RTA 实际轨迹设置生成参考，输出时仍保留原始自车导航路线和背景交通。接触目标放在有效运行窗口内的 2–3 s，目标中心间距为 3.8 m，目标接近速度增量依次测试 3 m/s、6 m/s。它使用 Adv-BMT 原有 8 模态输出，并优先选择起点确实在后方、方向一致且间距足够的模式。
+
+初始质量检查排除过近起点和明显侧向来车：初始纵向中心距离至少约 8 m、估计车身净间距至少 3 m、横向偏移不超过 3 m、航向差不超过 45°。候选随后由无 RTA 的固定 TD3 闭环运行；仅当指定攻击车发生实际物理接触、接触点位于自车后部、车辆大致同向且 MetaDrive 确认车辆碰撞时才入选。首次接触须在运行至少 1 s 后，每个源场景最多保留一个候选。
+
+专项集的筛选不运行 RTA，也不依赖 TTC。纯危险但未碰撞、前向碰撞、车身中部侧擦、初始重叠和退化路线均不能作为后向碰撞入选依据。`RearAttackAuditEnv` 的 `rear_collision` 使用上述较严格口径，旧的 `rear_attacker_contact` 只检查攻击车中心在后方，两者分别保存。
+
+```powershell
+python mine_rear_collision_scenarios.py `
+  --source_dir "Baseline Scenarios/scenarionet_waymo_training_500" `
+  --ckpt_path "td3_waymo_native/seed_0_300000_steps.zip" `
+  --candidate_dir "Adv-BMT scenarios/my_rear_collision_candidates" `
+  --selected_dir "Adv-BMT scenarios/my_rear_collision_confirmed" `
+  --manifest "analysis_outputs/rta_diagnostics/my_rear_collision_mining.json" `
+  --num_sources 150 --target_count 20 --seed 0
+```
+
+生成会在候选目录保留所有尝试，并在清单中记录源场景、种子、参数、拒绝原因及实撞审计。`--resume` 可以继续未完成的同一任务；已生成的候选不会覆盖。原有普通追尾场景集独立保留。
+
+这是按“固定无 RTA 基线发生后向碰撞”条件筛选的专项压力测试集。入选集中的高基线碰撞率是筛选条件，不能作为原始交通分布的事故率；应同时报告检查的源场景数、候选数和入选率。该集也不代表已经证明所有场景均存在可行避碰控制。冻结场景后再运行 RTA，两组执行完全相同的固定后车轨迹。
+
+本轮检查 97 个源场景，生成 96 个候选，生成阶段实撞验收通过 20 个。导出后独立复测发现一例未重现碰撞、另有一例未满足严格后部接触判据，因此只按无 RTA 的复测结果保留 18 个。最终场景目录为 `Adv-BMT scenarios/rear_collision_confirmed_v2_18`；该目录再次完整评估后，18/18 均被无 RTA 的 TD3 实际追尾，没有退化路线或仅威胁而未碰撞的样本。场景文件在 RTA 评估前冻结，评估后哈希不变。
+
+| 最终18场景配对结果 | 无 RTA | FSM–HOCBF-QP |
+|---|---:|---:|
+| 指定攻击车、后部接触点及原生标志确认的后向碰撞 | 18 | 12 |
+| 全部车辆碰撞事件 | 18 | 14 |
+| 成功到达 | 0 | 2 |
+| 道路违规终止 | 0 | 2 |
+
+RTA 的另外两次车辆碰撞未被较严格的后部接触审计确认；它们仍计入全部碰撞，不能当作已避免碰撞。当前控制器在这一高风险专项集中仍有明显不足。摘要为 `analysis_outputs/rta_diagnostics/rear_collision_challenge_v2_summary.json`，完整结果分别为 `rear_collision_confirmed_v2_none_18.json` 和 `rear_collision_confirmed_v2_fsm_18.json`，样本清单及哈希为 `rear_collision_confirmed_v2_18_manifest.json`。原20场景池及开发试验保留用于追溯，不作为最终18场景结果。

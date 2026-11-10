@@ -56,6 +56,9 @@ class CBFConfig:
     fsm_exit_h: float = 1.20
     fsm_enter_psi1: float = 0.50
     fsm_exit_psi1: float = 1.00
+    fsm_closing_speed_epsilon: float = 1e-3
+    fsm_barrier_rate_epsilon: float = 1e-3
+    fsm_lateral_convergence_product_epsilon: float = 1e-3
     fsm_min_dwell_steps: int = 5
     fsm_clear_steps: int = 3
     fsm_recovery_steps: int = 5
@@ -70,6 +73,11 @@ class CBFConfig:
     fsm_brake_ramp_start_steps: int = 10
     fsm_brake_ramp_steps: int = 20
     fsm_recovery_heading_gain: float = 1.0
+    fsm_corner_road_cbf_max_speed: float = 2.0
+    fsm_road_recovery_max_initial_penetration: float = 0.25
+    fsm_road_recovery_release_h: float = 0.02
+    fsm_road_recovery_acceleration: float = 1.0
+    fsm_road_recovery_curvature_fraction: float = 0.75
     fallback_penalty: float = 1000.0
     fallback_iterations: int = 120
     constraint_tolerance: float = 1e-7
@@ -118,11 +126,22 @@ class CBFConfig:
             ),
             "preview_max_obstacles": self.preview_max_obstacles,
             "fsm_min_dwell_steps": self.fsm_min_dwell_steps,
+            "fsm_closing_speed_epsilon": self.fsm_closing_speed_epsilon,
+            "fsm_barrier_rate_epsilon": self.fsm_barrier_rate_epsilon,
+            "fsm_lateral_convergence_product_epsilon": (
+                self.fsm_lateral_convergence_product_epsilon
+            ),
             "fsm_brake_ramp_start_steps": self.fsm_brake_ramp_start_steps,
             "fsm_min_side_margin": self.fsm_min_side_margin,
             "fsm_front_escape_min_margin": self.fsm_front_escape_min_margin,
             "fsm_direction_hysteresis": self.fsm_direction_hysteresis,
             "fsm_recovery_heading_gain": self.fsm_recovery_heading_gain,
+            "fsm_corner_road_cbf_max_speed": self.fsm_corner_road_cbf_max_speed,
+            "fsm_road_recovery_max_initial_penetration": (
+                self.fsm_road_recovery_max_initial_penetration
+            ),
+            "fsm_road_recovery_release_h": self.fsm_road_recovery_release_h,
+            "fsm_road_recovery_acceleration": self.fsm_road_recovery_acceleration,
         }
         for name, value in nonnegative.items():
             if value < 0:
@@ -143,6 +162,12 @@ class CBFConfig:
             raise ValueError(
                 "fsm_brake_acceleration must be nonpositive and lie inside the acceleration bounds"
             )
+        if not 0.0 <= self.fsm_road_recovery_acceleration <= self.max_acceleration:
+            raise ValueError(
+                "fsm_road_recovery_acceleration must lie between zero and max_acceleration"
+            )
+        if not 0.0 < self.fsm_road_recovery_curvature_fraction <= 1.0:
+            raise ValueError("fsm_road_recovery_curvature_fraction must be in (0, 1]")
 
     @classmethod
     def from_mapping(cls, values: Optional[Mapping[str, Any]] = None) -> "CBFConfig":
@@ -180,7 +205,9 @@ class VehicleState2D:
     def __post_init__(self):
         object.__setattr__(self, "position", _vector2(self.position, "position"))
         object.__setattr__(self, "velocity", _vector2(self.velocity, "velocity"))
-        object.__setattr__(self, "acceleration", _vector2(self.acceleration, "acceleration"))
+        object.__setattr__(
+            self, "acceleration", _vector2(self.acceleration, "acceleration")
+        )
         object.__setattr__(self, "kind", str(self.kind).lower())
         if self.length <= 0 or self.width <= 0:
             raise ValueError("vehicle length and width must be positive")
@@ -223,6 +250,9 @@ class BarrierDiagnostic:
     h_dot: float
     psi1: float
     residual: float = 0.0
+    nominal_h: Optional[float] = None
+    effective_h: Optional[float] = None
+    effective_residual: Optional[float] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -256,6 +286,11 @@ class FilterResult:
     def to_telemetry(self) -> Dict[str, Any]:
         vehicle_h = [item.h for item in self.diagnostics if item.kind == "vehicle"]
         road_h = [item.h for item in self.diagnostics if item.kind == "road"]
+        effective_road_h = [
+            item.effective_h if item.effective_h is not None else item.h
+            for item in self.diagnostics
+            if item.kind == "road"
+        ]
         reference = self.reference_control or self.nominal_control
         return {
             "rta_enabled": True,
@@ -277,6 +312,9 @@ class FilterResult:
             "rta_safe_curvature": self.control.curvature,
             "rta_min_vehicle_h": min(vehicle_h) if vehicle_h else None,
             "rta_min_road_h": min(road_h) if road_h else None,
+            "rta_min_effective_road_h": (
+                min(effective_road_h) if effective_road_h else None
+            ),
             "rta_candidate_scores": dict(self.candidate_scores),
             "rta_fsm_previous_mode": self.previous_mode,
             "rta_fsm_transition_reason": self.transition_reason,

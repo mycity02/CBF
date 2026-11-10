@@ -26,9 +26,21 @@ def main():
     parser.add_argument("--rear_offset", type=float, default=None)
     parser.add_argument("--speed_delta", type=float, default=3.0)
     parser.add_argument("--heading_noise_std", type=float, default=0.0)
+    parser.add_argument("--attack_time", type=float, default=None,
+                        help="Contact target time in seconds, aligned to 0.5 s; default: final valid SDC frame.")
+    parser.add_argument("--start_index", type=int, default=0)
+    parser.add_argument("--seed", type=int, default=0)
     args = parser.parse_args()
 
     from bmt.rl_train.train.scgen_rear_attack_generator import RearAttackSCGEN_Generator
+    import random
+    import numpy as np
+    import torch
+
+    random.seed(args.seed)
+    np.random.seed(args.seed)
+    torch.manual_seed(args.seed)
+    torch.cuda.manual_seed_all(args.seed)
 
     os.makedirs(args.save_dir, exist_ok=True)
     generator = RearAttackSCGEN_Generator(
@@ -36,6 +48,7 @@ def main():
         rear_offset=args.rear_offset,
         speed_delta=args.speed_delta,
         heading_noise_std=args.heading_noise_std,
+        attack_time=args.attack_time,
     )
 
     all_scenario_files = get_filenames(args.dir)
@@ -43,7 +56,10 @@ def main():
         raise RuntimeError(f"No scenario files found in {args.dir}")
 
     for scenario_idx in tqdm(range(args.num_scenario)):
-        sd_path = all_scenario_files[scenario_idx % len(all_scenario_files)]
+        source_index = args.start_index + scenario_idx
+        if source_index < 0 or source_index >= len(all_scenario_files):
+            raise ValueError("Requested scenario range is outside the source dataset")
+        sd_path = all_scenario_files[source_index]
         with open(sd_path, "rb") as f:
             scenario_data = pickle.load(f)
 
@@ -57,7 +73,7 @@ def main():
                 break
 
             out_name = f"sd_{sid}_SCGEN_{args.TF_mode}_rear_attack_mode_{mode_idx}.pkl"
-            with open(os.path.join(args.save_dir, out_name), "wb") as f:
+            with open(os.path.join(args.save_dir, out_name), "xb") as f:
                 pickle.dump(rear_attack_sd, f)
 
 

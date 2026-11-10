@@ -1,6 +1,7 @@
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 
 from bmt.runtime_assurance.adaptive_plugin import (
     AdaptiveMetaDriveCBFPlugin,
@@ -95,6 +96,7 @@ def test_aligned_closing_vehicle_activates_before_it_is_near():
     road = RoadGeometry(heading=0.0, left_clearance=5.0, right_clearance=5.0)
 
     assert cbf._active_obstacles(ego, [obstacle], road) == [obstacle]
+
 
 def test_distant_vulnerable_road_user_uses_a_shorter_activation_horizon():
     cbf = PredictiveEscapeCBF(
@@ -228,6 +230,7 @@ def test_low_speed_recovery_bypasses_only_an_initially_tight_road_margin():
     assert result.fallback_mode == "low_speed_road_recovery"
     np.testing.assert_allclose(result.control.as_array(), nominal.as_array(), atol=1e-9)
 
+
 def test_low_speed_recovery_does_not_bypass_a_physical_road_violation():
     cbf = PredictiveEscapeCBF(
         CBFConfig(
@@ -283,7 +286,6 @@ def test_low_speed_recovery_accepts_heading_away_from_the_tight_boundary():
 
     assert result.fallback_mode == "low_speed_road_recovery"
     assert not result.intervened
-
 
 
 def test_front_rear_squeeze_generates_a_lateral_escape():
@@ -344,6 +346,7 @@ def test_metadrive_adapter_is_external_and_returns_normalized_action():
     assert telemetry["rta_obstacle_count"] == 1
     assert telemetry["rta_active_obstacle_count"] == 1
 
+
 def test_metadrive_adapter_uses_side_detector_road_boundaries():
     ego = _FakeVehicle("ego", [0.0, 0.0], [0.0, 0.0])
     ego.config = {
@@ -353,12 +356,8 @@ def test_metadrive_adapter_uses_side_detector_road_boundaries():
         }
     }
     ego.side_detector = _FakeSideDetector([0.04, 1.0, 0.06, 1.0])
-    ego.engine = SimpleNamespace(
-        physics_world=SimpleNamespace(static_world=object())
-    )
-    plugin = AdaptiveMetaDriveCBFPlugin(
-        CBFConfig(road_use_side_detector=True)
-    )
+    ego.engine = SimpleNamespace(physics_world=SimpleNamespace(static_world=object()))
+    plugin = AdaptiveMetaDriveCBFPlugin(CBFConfig(road_use_side_detector=True))
 
     road = plugin._road_geometry(ego)
 
@@ -378,12 +377,8 @@ def test_metadrive_adapter_side_detector_never_relaxes_reference_route():
         }
     }
     ego.side_detector = _FakeSideDetector([0.20, 1.0, 0.20, 1.0])
-    ego.engine = SimpleNamespace(
-        physics_world=SimpleNamespace(static_world=object())
-    )
-    plugin = AdaptiveMetaDriveCBFPlugin(
-        CBFConfig(road_use_side_detector=True)
-    )
+    ego.engine = SimpleNamespace(physics_world=SimpleNamespace(static_world=object()))
+    plugin = AdaptiveMetaDriveCBFPlugin(CBFConfig(road_use_side_detector=True))
 
     road = plugin._road_geometry(ego)
 
@@ -400,6 +395,7 @@ class _FakeSideDetector:
     def perceive(self, *args, **kwargs):
         return SimpleNamespace(cloud_points=self.cloud_points)
 
+
 class _FakeVehicle:
     LENGTH = 4.5
     WIDTH = 2.0
@@ -413,6 +409,7 @@ class _FakeVehicle:
         self.dist_to_left_side = 5.0
         self.dist_to_right_side = 5.0
         self.navigation = SimpleNamespace(current_heading_theta_at_long=0.0)
+
 
 def test_fsm_squeeze_selects_one_persistent_mode_and_solves_one_qp():
     cbf = FSMHOCBF(
@@ -542,6 +539,7 @@ def test_fsm_nominal_passthrough_still_reports_current_road_barriers():
     assert len([item for item in result.diagnostics if item.kind == "road"]) == 2
     assert result.to_telemetry()["rta_min_road_h"] is not None
 
+
 def test_fsm_far_from_road_boundary_does_not_filter_an_outward_nominal_action():
     cbf = FSMHOCBF(
         CBFConfig(
@@ -574,15 +572,326 @@ def test_fsm_nominal_passthrough_cannot_bypass_an_unsafe_road_constraint():
 
     result = cbf.filter(
         nominal_control=Control2D(0.0, 0.0),
-        ego=vehicle("ego", 0.0, 0.0, 10.0),
+        ego=vehicle("ego", 0.0, 0.0, 2.0, heading=0.05),
         obstacles=[],
-        road=RoadGeometry(heading=0.0, left_clearance=1.1, right_clearance=5.0),
+        road=RoadGeometry(heading=0.0, left_clearance=1.35, right_clearance=5.0),
     )
 
     assert result.qp_solve_count == 1
     assert result.intervened
     assert result.control.curvature < 0.0
-    assert result.to_telemetry()["rta_min_road_h"] < 0.0
+    left = min(
+        (item for item in result.diagnostics if item.name.startswith("road:left")),
+        key=lambda item: item.h,
+    )
+    assert left.h > 0.0
+    assert result.fallback_mode != "low_speed_road_recovery"
+    assert left.residual >= -cbf.config.constraint_tolerance
+
+
+def test_fsm_low_speed_negative_road_h_uses_directed_recovery():
+    config = CBFConfig(
+        road_margin=0.20,
+        passthrough_without_active_obstacle=True,
+        road_low_speed_passthrough=2.0,
+        fsm_road_recovery_max_initial_penetration=0.25,
+        fsm_road_recovery_acceleration=1.0,
+    )
+    cbf = FSMHOCBF(config)
+    ego = vehicle("ego", 0.0, 0.0, 0.0, heading=0.06)
+    road = RoadGeometry(heading=0.0, left_clearance=1.15, right_clearance=3.0)
+    nominal = Control2D(3.0, 0.1)
+    left = min(
+        (
+            item
+            for item in cbf._road_barriers(ego, road)
+            if item.diagnostic.name.startswith("road:left")
+        ),
+        key=lambda item: item.diagnostic.h,
+    )
+
+    assert -config.fsm_road_recovery_max_initial_penetration < left.diagnostic.h < 0.0
+    result = cbf.filter(nominal, ego, [], road)
+
+    assert result.fallback_mode == "low_speed_road_recovery"
+    assert np.isclose(
+        result.control.acceleration,
+        config.fsm_road_recovery_acceleration,
+    )
+    assert result.control.curvature < 0.0
+    assert result.intervened
+
+
+def test_fsm_road_recovery_rejects_excessive_initial_penetration():
+    cbf = FSMHOCBF(
+        CBFConfig(
+            road_margin=0.20,
+            passthrough_without_active_obstacle=True,
+            road_low_speed_passthrough=2.0,
+            fsm_road_recovery_max_initial_penetration=0.10,
+        )
+    )
+    result = cbf.filter(
+        Control2D(3.0, 0.1),
+        vehicle("ego", 0.0, 0.0, 0.0, heading=0.06),
+        [],
+        RoadGeometry(heading=0.0, left_clearance=1.15, right_clearance=3.0),
+    )
+
+    assert result.fallback_mode == "road_recovery_fail_stop"
+    assert result.qp_solve_count == 0
+    assert not result.hard_feasible
+    assert not result.mandatory_feasible
+    assert result.control.acceleration <= 0.0
+    assert result.control.curvature < 0.0
+    assert result.max_constraint_violation > 0.0
+    assert result.normalized_constraint_violation > 0.0
+
+
+@pytest.mark.parametrize(
+    "heading,left_clearance,right_clearance,nominal_curvature,expected_sign",
+    [
+        (0.06, 1.15, 3.0, 0.1, -1.0),
+        (-0.06, 3.0, 1.15, -0.1, 1.0),
+    ],
+)
+def test_fsm_low_speed_recovery_is_symmetric_at_both_road_boundaries(
+    heading,
+    left_clearance,
+    right_clearance,
+    nominal_curvature,
+    expected_sign,
+):
+    cbf = FSMHOCBF(
+        CBFConfig(
+            road_margin=0.20,
+            passthrough_without_active_obstacle=True,
+            road_low_speed_passthrough=2.0,
+        )
+    )
+
+    result = cbf.filter(
+        Control2D(3.0, nominal_curvature),
+        vehicle("ego", 0.0, 0.0, 0.0, heading=heading),
+        [],
+        RoadGeometry(
+            heading=0.0,
+            left_clearance=left_clearance,
+            right_clearance=right_clearance,
+        ),
+    )
+
+    assert result.fallback_mode == "low_speed_road_recovery"
+    assert result.hard_feasible
+    assert result.mandatory_feasible
+    assert result.control.acceleration > 0.0
+    assert expected_sign * result.control.curvature > 0.0
+    assert all(
+        item.residual >= -cbf.config.constraint_tolerance
+        for item in result.diagnostics
+        if item.kind == "road"
+    )
+
+
+def test_fsm_raw_corner_cbf_recovery_keeps_nominal_acceleration_when_feasible():
+    heading = 0.059
+    speed = 0.333
+    ego = VehicleState2D(
+        name="ego",
+        position=np.zeros(2),
+        velocity=speed * np.asarray([np.cos(heading), np.sin(heading)]),
+        acceleration=np.zeros(2),
+        heading=heading,
+        length=4.515,
+        width=1.852,
+        kind="vehicle",
+    )
+    projected_extent = 0.5 * ego.length * np.sin(heading) + 0.5 * ego.width * np.cos(
+        heading
+    )
+    cbf = FSMHOCBF(
+        CBFConfig(
+            road_margin=0.05,
+            passthrough_without_active_obstacle=True,
+            road_low_speed_passthrough=2.0,
+        )
+    )
+
+    result = cbf.filter(
+        Control2D(3.0, 0.134),
+        ego,
+        [],
+        RoadGeometry(
+            heading=0.0,
+            left_clearance=projected_extent + 0.05 - 0.10859,
+            right_clearance=5.0,
+        ),
+    )
+
+    left_front = next(
+        item for item in result.diagnostics if item.name == "road:left:front_left"
+    )
+    assert np.isclose(left_front.h, -0.10859)
+    assert result.fallback_mode == "directed_road_recovery"
+    assert result.hard_feasible
+    assert np.isclose(result.control.acceleration, 3.0)
+    assert result.control.curvature < 0.0
+    assert left_front.residual >= -cbf.config.constraint_tolerance
+    assert np.isclose(left_front.psi1, left_front.residual)
+
+
+def test_fsm_low_speed_road_recovery_and_rear_constraint_share_one_qp():
+    cbf = FSMHOCBF(
+        CBFConfig(
+            road_margin=0.20,
+            passthrough_without_active_obstacle=True,
+            road_low_speed_passthrough=2.0,
+            other_accel_uncertainty=0.0,
+        )
+    )
+    result = cbf.filter(
+        Control2D(3.0, 0.1),
+        vehicle("ego", 0.0, 0.0, 0.0, heading=0.06),
+        [vehicle("rear", -5.0, 0.0, 0.1)],
+        RoadGeometry(heading=0.0, left_clearance=1.15, right_clearance=3.0),
+    )
+
+    assert result.fallback_mode == "low_speed_road_recovery"
+    assert result.active_obstacle_count == 1
+    assert result.qp_solve_count == 1
+    assert result.hard_feasible
+    assert result.mandatory_feasible
+    assert result.control.acceleration > 0.0
+    assert result.control.curvature < 0.0
+    assert any(item.kind == "vehicle" for item in result.diagnostics)
+    assert all(
+        item.residual >= -cbf.config.constraint_tolerance for item in result.diagnostics
+    )
+    recovered = next(
+        item
+        for item in result.diagnostics
+        if item.kind == "road" and item.h < 0.0
+    )
+    assert np.isclose(recovered.nominal_h, recovered.h)
+    assert recovered.effective_h > 0.0
+    assert np.isclose(recovered.effective_residual, recovered.residual)
+    assert np.isclose(
+        recovered.psi1,
+        recovered.h_dot + cbf.config.alpha1 * recovered.nominal_h,
+    )
+    assert recovered.psi1 < 0.0
+    assert recovered.effective_residual >= -cbf.config.constraint_tolerance
+
+
+def test_fsm_unrecoverable_road_set_does_not_fail_stop_into_a_rear_threat():
+    cbf = FSMHOCBF(
+        CBFConfig(
+            road_margin=0.20,
+            passthrough_without_active_obstacle=True,
+            road_low_speed_passthrough=2.0,
+            fsm_road_recovery_max_initial_penetration=0.10,
+            other_accel_uncertainty=0.0,
+        )
+    )
+    result = cbf.filter(
+        Control2D(3.0, 0.1),
+        vehicle("ego", 0.0, 0.0, 0.0, heading=0.06),
+        [vehicle("rear", -5.0, 0.0, 0.1)],
+        RoadGeometry(heading=0.0, left_clearance=1.15, right_clearance=3.0),
+    )
+
+    assert result.active_obstacle_count == 1
+    assert result.qp_solve_count == 1
+    assert result.fallback_mode == "road_recovery_conflict+relaxed_road"
+    assert not result.hard_feasible
+    assert result.mandatory_feasible
+    assert result.control.acceleration > 0.0
+    vehicle_diagnostic = next(
+        item for item in result.diagnostics if item.kind == "vehicle"
+    )
+    assert vehicle_diagnostic.residual >= -cbf.config.constraint_tolerance
+
+
+def test_fsm_nominal_safe_front_vehicle_does_not_disable_road_fail_stop():
+    cbf = FSMHOCBF(
+        CBFConfig(
+            road_margin=0.20,
+            passthrough_without_active_obstacle=True,
+            road_low_speed_passthrough=2.0,
+            fsm_road_recovery_max_initial_penetration=0.10,
+            other_accel_uncertainty=0.0,
+        )
+    )
+    result = cbf.filter(
+        Control2D(3.0, 0.1),
+        vehicle("ego", 0.0, 0.0, 0.0, heading=0.06),
+        [vehicle("front", 10.0, 0.0, 0.0)],
+        RoadGeometry(heading=0.0, left_clearance=1.15, right_clearance=3.0),
+    )
+
+    assert result.active_obstacle_count == 1
+    assert result.fallback_mode == "road_recovery_fail_stop"
+    assert result.qp_solve_count == 0
+    assert result.control.acceleration <= 0.0
+    vehicle_diagnostic = next(
+        item for item in result.diagnostics if item.kind == "vehicle"
+    )
+    assert vehicle_diagnostic.residual >= -cbf.config.constraint_tolerance
+
+
+def test_fsm_road_recovery_latches_until_release_and_reset_clears_it():
+    config = CBFConfig(
+        road_margin=0.20,
+        passthrough_without_active_obstacle=True,
+        road_low_speed_passthrough=2.0,
+    )
+    cbf = FSMHOCBF(config)
+    road_tight = RoadGeometry(
+        heading=0.0,
+        left_clearance=1.15,
+        right_clearance=3.0,
+    )
+
+    entering = cbf.filter(
+        Control2D(3.0, 0.1),
+        vehicle("ego", 0.0, 0.0, 0.0, heading=0.06),
+        [],
+        road_tight,
+    )
+    latched = cbf.filter(
+        Control2D(3.0, 0.1),
+        vehicle("ego", 0.0, 0.0, 2.5, heading=0.06),
+        [],
+        RoadGeometry(heading=0.0, left_clearance=1.20, right_clearance=3.0),
+    )
+    released = cbf.filter(
+        Control2D(3.0, -0.03),
+        vehicle("ego", 0.0, 0.0, 2.5, heading=0.06),
+        [],
+        RoadGeometry(heading=0.0, left_clearance=1.36, right_clearance=3.0),
+    )
+
+    assert entering.fallback_mode == "low_speed_road_recovery"
+    assert latched.fallback_mode == "low_speed_road_recovery"
+    assert released.fallback_mode == "inactive"
+    assert cbf._road_recovery_barrier_name is None
+
+    cbf.filter(
+        Control2D(3.0, 0.1),
+        vehicle("ego", 0.0, 0.0, 0.0, heading=0.06),
+        [],
+        road_tight,
+    )
+    assert cbf._road_recovery_barrier_name == "road:left"
+    cbf.reset()
+    after_reset = cbf.filter(
+        Control2D(3.0, -0.03),
+        vehicle("ego", 0.0, 0.0, 2.5, heading=0.06),
+        [],
+        RoadGeometry(heading=0.0, left_clearance=1.20, right_clearance=3.0),
+    )
+    assert cbf._road_recovery_barrier_name is None
+    assert "road_recovery" not in after_reset.fallback_mode
 
 
 def test_road_barrier_uses_heading_dependent_vehicle_footprint():
@@ -594,12 +903,57 @@ def test_road_barrier_uses_heading_dependent_vehicle_footprint():
         RoadGeometry(heading=0.0, left_clearance=2.0, right_clearance=5.0),
     )
 
-    left = next(item for item in barriers if item.diagnostic.name == "road:left")
+    left = min(
+        (item for item in barriers if item.diagnostic.name.startswith("road:left")),
+        key=lambda item: item.diagnostic.h,
+    )
     expected_extent = 0.5 * ego.length * np.sin(np.pi / 6.0) + 0.5 * ego.width * np.cos(
         np.pi / 6.0
     )
     assert np.isclose(left.diagnostic.h, 2.0 - expected_extent - 0.05)
     assert left.diagnostic.h < 0.0
+
+
+def test_fsm_corner_road_cbf_steers_inward_without_braking_at_low_speed():
+    heading = 0.059
+    ego = VehicleState2D(
+        name="ego",
+        position=np.zeros(2),
+        velocity=0.333 * np.asarray([np.cos(heading), np.sin(heading)]),
+        acceleration=np.zeros(2),
+        heading=heading,
+        length=4.515,
+        width=1.852,
+        kind="vehicle",
+    )
+    projected_extent = 0.5 * ego.length * np.sin(heading) + 0.5 * ego.width * np.cos(
+        heading
+    )
+    left_clearance = projected_extent + 0.05 - 0.10859
+    cbf = FSMHOCBF(
+        CBFConfig(
+            road_margin=0.05,
+            passthrough_without_active_obstacle=True,
+            road_low_speed_passthrough=0.0,
+        )
+    )
+
+    result = cbf.filter(
+        Control2D(3.0, 0.134),
+        ego,
+        [],
+        RoadGeometry(heading=0.0, left_clearance=left_clearance, right_clearance=5.0),
+    )
+
+    left_front = next(
+        item for item in result.diagnostics if item.name == "road:left:front_left"
+    )
+    assert np.isclose(left_front.h, -0.10859)
+    assert result.hard_feasible
+    assert result.fallback_mode == "none"
+    assert np.isclose(result.control.acceleration, 3.0)
+    assert result.control.curvature <= -0.212
+    assert left_front.residual >= -cbf.config.constraint_tolerance
 
 
 def test_fsm_rear_threat_does_not_wait_for_full_lateral_overlap():
@@ -618,6 +972,114 @@ def test_fsm_rear_threat_does_not_wait_for_full_lateral_overlap():
 
     assert result.mode == "escape_right"
     assert result.transition_reason.startswith("rear_threat")
+    assert result.active_obstacle_count == 1
+    assert result.qp_solve_count == 1
+    assert result.reference_control.curvature < 0.0
+
+
+def test_fsm_non_overlapping_side_vehicle_stays_out_of_hard_qp():
+    cbf = FSMHOCBF(
+        CBFConfig(
+            other_accel_uncertainty=0.0,
+            passthrough_without_active_obstacle=True,
+            activation_require_current_lateral_overlap=True,
+        )
+    )
+    road = RoadGeometry(heading=0.0, left_clearance=6.0, right_clearance=6.0)
+    ego = vehicle("ego", 0.0, 0.0, 10.0)
+    side = vehicle("side", 15.0, 3.0, 0.0)
+    nominal = Control2D(3.0, 0.0)
+
+    assert not cbf._current_lateral_overlap(ego, side, road)
+    result = cbf.filter(nominal, ego, [side], road)
+
+    assert result.active_obstacle_count == 0
+    assert result.qp_solve_count == 0
+    assert not result.intervened
+    np.testing.assert_allclose(result.control.as_array(), nominal.as_array())
+
+
+def test_fsm_non_overlapping_vulnerable_road_user_remains_active():
+    cbf = FSMHOCBF(CBFConfig(other_accel_uncertainty=0.0))
+    road = RoadGeometry(heading=0.0, left_clearance=6.0, right_clearance=6.0)
+    ego = vehicle("ego", 0.0, 0.0, 10.0)
+    pedestrian = vehicle("pedestrian", 15.0, 3.0, 0.0, kind="pedestrian")
+
+    assert not cbf._current_lateral_overlap(ego, pedestrian, road)
+    assert cbf._current_active_obstacles(ego, [pedestrian], road) == [pedestrian]
+
+
+def test_fsm_non_overlapping_front_cutin_remains_active():
+    cbf = FSMHOCBF(CBFConfig(other_accel_uncertainty=0.0))
+    road = RoadGeometry(heading=0.0, left_clearance=6.0, right_clearance=6.0)
+    ego = vehicle("ego", 0.0, 0.0, 10.0)
+    cutin = vehicle("cutin", 10.0, 3.0, 10.0, heading=-0.20)
+
+    assert not cbf._current_lateral_overlap(ego, cutin, road)
+    active = cbf._current_active_obstacles(ego, [cutin], road)
+
+    assert active == [cutin]
+
+
+def test_fsm_far_offset_rear_vehicle_stays_inactive():
+    cbf = FSMHOCBF(CBFConfig(other_accel_uncertainty=0.0))
+    road = RoadGeometry(heading=0.0, left_clearance=6.0, right_clearance=6.0)
+    ego = vehicle("ego", 0.0, 0.0, 10.0)
+    offset_rear = vehicle("offset_rear", -2.0, 3.5, 12.0)
+
+    assert not cbf._current_lateral_overlap(ego, offset_rear, road)
+    assert cbf._current_active_obstacles(ego, [offset_rear], road) == []
+
+
+def test_fsm_nominal_safe_front_constraint_does_not_enter_brake():
+    cbf = FSMHOCBF(CBFConfig(other_accel_uncertainty=0.0))
+    nominal = Control2D(3.0, 0.0)
+    result = cbf.filter(
+        nominal,
+        vehicle("ego", 0.0, 0.0, 10.0),
+        [vehicle("front", 10.0, 0.0, 10.0)],
+        RoadGeometry(heading=0.0, left_clearance=6.0, right_clearance=6.0),
+    )
+
+    assert result.active_obstacle_count == 1
+    assert result.qp_solve_count == 1
+    assert result.mode == "nominal"
+    assert not result.intervened
+    np.testing.assert_allclose(result.control.as_array(), nominal.as_array())
+
+
+def test_fsm_nominal_unsafe_front_constraint_enters_brake():
+    cbf = FSMHOCBF(CBFConfig(other_accel_uncertainty=0.0))
+    nominal = Control2D(3.0, 0.0)
+    ego = vehicle("ego", 0.0, 0.0, 10.0)
+    front = vehicle("front", 10.0, 0.0, 8.0)
+    road = RoadGeometry(heading=0.0, left_clearance=6.0, right_clearance=6.0)
+    barrier = cbf._vehicle_barrier(ego, front, road)
+
+    assert barrier.diagnostic.h > 0.0
+    assert barrier.constraint.residual(nominal.as_array()) < 0.0
+    result = cbf.filter(nominal, ego, [front], road)
+
+    assert result.mode == "brake"
+    assert result.transition_reason.startswith("front_threat")
+    assert result.intervened
+
+
+def test_fsm_unsafe_front_h_enters_brake_even_if_nominal_residual_is_safe():
+    cbf = FSMHOCBF(CBFConfig(other_accel_uncertainty=0.0))
+    nominal = Control2D(3.0, 0.0)
+    ego = vehicle("ego", 0.0, 0.0, 10.0)
+    front = vehicle("front", 6.0, 0.0, 15.0)
+    road = RoadGeometry(heading=0.0, left_clearance=6.0, right_clearance=6.0)
+    barrier = cbf._vehicle_barrier(ego, front, road)
+
+    assert barrier.diagnostic.h < 0.0
+    assert barrier.constraint.residual(nominal.as_array()) > 0.0
+    result = cbf.filter(nominal, ego, [front], road)
+
+    assert result.mode == "brake"
+    assert result.transition_reason.startswith("front_threat")
+    assert result.intervened
 
 
 def test_fsm_escape_reference_is_current_state_feedback_without_a_horizon():

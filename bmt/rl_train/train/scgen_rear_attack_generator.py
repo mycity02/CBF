@@ -21,8 +21,9 @@ def create_rear_attack_adv_batched(
     rear_offset=None,
     speed_delta=3.0,
     heading_noise_std=0.0,
+    attack_step=None,
 ):
-    """Append a new adversarial vehicle behind SDC at the SDC final valid step."""
+    """Anchor an adversary behind SDC, at the final or a requested valid step."""
     B, T, _, _ = batched_data_dict["decoder/agent_position"].shape
     ego_id = batched_data_dict["decoder/sdc_index"]
     device = ego_id.device
@@ -36,6 +37,12 @@ def create_rear_attack_adv_batched(
 
     ego_last_valid_step = ego_mask.float().cumsum(dim=1).argmax(dim=1)
     adv_last_valid_step = ego_last_valid_step.clone()
+    if attack_step is not None:
+        if not isinstance(attack_step, int) or isinstance(attack_step, bool) or attack_step < 1 or attack_step >= T:
+            raise ValueError(f"attack_step must be an integer in [1, {T - 1}]")
+        if not bool(ego_mask[:, attack_step].all()):
+            raise ValueError(f"SDC must be valid at requested attack_step={attack_step}")
+        adv_last_valid_step.fill_(attack_step)
 
     adv_mask = torch.zeros_like(ego_mask)
     adv_traj = torch.zeros_like(ego_pos)
@@ -131,18 +138,25 @@ class RearAttackSCGEN_Generator(SCGEN_Generator):
         rear_offset=None,
         speed_delta=3.0,
         heading_noise_std=0.0,
+        attack_time=None,
+        initial_rear_filter=False,
     ):
+        if attack_time is not None and (not np.isfinite(attack_time) or attack_time <= 0):
+            raise ValueError("attack_time must be a positive finite number of seconds")
         super().__init__(model_name=model_name, TF_mode=TF_mode, ckpt_path=ckpt_path)
         self.rear_offset = rear_offset
         self.speed_delta = speed_delta
         self.heading_noise_std = heading_noise_std
+        self.attack_time = attack_time
+        self.initial_rear_filter = initial_rear_filter
 
-    def _create_rear_attack_batch(self, batched_data_dict):
+    def _create_rear_attack_batch(self, batched_data_dict, attack_step=None):
         return create_rear_attack_adv_batched(
             batched_data_dict,
             rear_offset=self.rear_offset,
             speed_delta=self.speed_delta,
             heading_noise_std=self.heading_noise_std,
+            attack_step=attack_step,
         )
 
     def _select_rear_attack_mode(self, output_data, adv_id):
@@ -167,15 +181,41 @@ class RearAttackSCGEN_Generator(SCGEN_Generator):
             lateral = abs(torch.dot(rel, lateral_axis).item())
             heading_diff = abs(torch.atan2(torch.sin(adv_heading - ego_heading), torch.cos(adv_heading - ego_heading)).item())
 
+            if self.initial_rear_filter:
+                if not bool(mask[0]):
+                    continue
+                ego_start = output_data["decoder/agent_position"][i, 0, ego_id, :2]
+                ego_start_heading = output_data["decoder/agent_heading"][i, 0, ego_id]
+                adv_start = output_data["decoder/reconstructed_position"][i, 0, adv_id, :2]
+                adv_start_heading = output_data["decoder/reconstructed_heading"][i, 0, adv_id]
+                start_forward = torch.stack([torch.cos(ego_start_heading), torch.sin(ego_start_heading)])
+                start_normal = torch.stack([-torch.sin(ego_start_heading), torch.cos(ego_start_heading)])
+                start_relative = adv_start - ego_start
+                start_angle = adv_start_heading - ego_start_heading
+                if (
+                    torch.dot(start_relative, start_forward).item() > -8.5
+                    or abs(torch.dot(start_relative, start_normal).item()) > 3.0
+                    or abs(torch.atan2(torch.sin(start_angle), torch.cos(start_angle)).item()) > np.pi / 4
+                ):
+                    continue
+
             if longitudinal < -0.5 and lateral < 3.0 and heading_diff < np.deg2rad(45):
                 return i
 
         return fallback_mode
 
-    def _generate_from_scenario(self, scenario_data, track_length=91, adaptive=True):
+    def _generate_from_scenario(self, scenario_data, track_length=91, adaptive=True, reference_rollout=None):
         from bmt.dataset.preprocessor import preprocess_scenario_description_for_motionlm
 
-        if adaptive:
+        if reference_rollout is not None:
+            overwritten_sd = overwrite_new_sdc_traj_to_SD(
+                copy.deepcopy(scenario_data),
+                np.asarray(reference_rollout["position"], dtype=float),
+                np.asarray(reference_rollout["heading"], dtype=float),
+                np.asarray(reference_rollout["velocity"], dtype=float),
+                track_length=track_length,
+            )
+        elif adaptive:
             sid = scenario_data["id"]
             sdc_traj = self.storage[sid].get("SDC_traj")
             if sdc_traj.shape[0] <= 10:
@@ -202,6 +242,15 @@ class RearAttackSCGEN_Generator(SCGEN_Generator):
         else:
             overwritten_sd = copy.deepcopy(scenario_data)
 
+        attack_step = None
+        stride = self.tokenizer.num_skipped_steps
+        frame_seconds = self.tokenizer.dt / stride
+        if self.attack_time is not None:
+            # Replay uses a fixed frame clock, not potentially irregular Waymo timestamps.
+            attack_step = resolve_attack_step(
+                self.attack_time, frame_seconds, stride, overwritten_sd["length"]
+            )
+
         original_data_dict = preprocess_scenario_description_for_motionlm(
             scenario=overwritten_sd,
             config=self.config,
@@ -214,7 +263,9 @@ class RearAttackSCGEN_Generator(SCGEN_Generator):
         data_dict = copy.deepcopy(original_data_dict)
         batched_data_dict = batch_data(utils.numpy_to_torch(data_dict, device=self.pl_model.device))
         batched_data_dict = _expand_batch(batched_data_dict, batch_size=self.num_modes)
-        batched_data_dict, adv_id, _ = self._create_rear_attack_batch(batched_data_dict)
+        batched_data_dict, adv_id, anchor_steps = self._create_rear_attack_batch(
+            batched_data_dict, attack_step=attack_step
+        )
         batched_data_dict = {
             k: v.to(self.pl_model.device) if isinstance(v, torch.Tensor) else v
             for k, v in batched_data_dict.items()
@@ -242,13 +293,33 @@ class RearAttackSCGEN_Generator(SCGEN_Generator):
         output_dict_mode = _get_mode(output_data_all_modes, best_mode_index, num_modes=self.num_modes)
         output_dict_mode_pred = transform_to_global_coordinate(output_dict_mode)
 
-        return overwrite_to_scenario_description_new_agent(
+        generated = overwrite_to_scenario_description_new_agent(
             output_dict_mode=output_dict_mode_pred,
             original_SD=copy.deepcopy(scenario_data),
             adv_id=adv_id,
             from_GT=False,
             ooi=[adv_id],
         )
+        anchor_step = int(anchor_steps[best_mode_index].item())
+        if self.attack_time is not None:
+            extend_post_anchor_track(generated, anchor_step, frame_seconds)
+        timestamps = np.asarray(generated["metadata"]["ts"], dtype=float)
+        generated["metadata"]["rear_attack"] = {
+            "anchor_step": anchor_step,
+            "anchor_time_seconds": anchor_step * frame_seconds,
+            "source_anchor_timestamp_seconds": float(timestamps[anchor_step] - timestamps[0]),
+            "playback_frame_seconds": frame_seconds,
+            "requested_attack_time_seconds": self.attack_time,
+            "reference": "frozen_td3_rollout" if reference_rollout is not None else (
+                "recorded_sdc" if not adaptive else "stored_sdc_rollout"
+            ),
+            "speed_delta": self.speed_delta,
+            "rear_offset": self.rear_offset,
+            "initial_rear_filter": self.initial_rear_filter,
+            "sampled_mode_index": int(best_mode_index),
+            "post_anchor_motion": "constant_velocity" if anchor_step < len(timestamps) - 1 and self.attack_time is not None else "none",
+        }
+        return generated
 
     def generate(self, scenario_data=None, track_length=91):
         if scenario_data is None:
@@ -261,4 +332,41 @@ class RearAttackSCGEN_Generator(SCGEN_Generator):
         if is_sdc_parking(scenario_data):
             return None
         return self._generate_from_scenario(scenario_data, track_length=track_length, adaptive=False)
+
+    def generate_from_reference_rollout(self, scenario_data, reference_rollout, track_length=91):
+        """Use a recorded nominal rollout for generation; retain the original ego route in the output."""
+        return self._generate_from_scenario(
+            scenario_data, track_length=track_length, adaptive=False,
+            reference_rollout=reference_rollout,
+        )
+
+
+def resolve_attack_step(attack_time, frame_seconds, stride, total_steps):
+    step = int(round(attack_time / frame_seconds))
+    if not np.isclose(step * frame_seconds, attack_time, rtol=0, atol=1e-6):
+        raise ValueError("attack_time must align with the replay frame clock")
+    if step < stride or step >= total_steps or step % stride:
+        raise ValueError(f"attack_time must align with {stride}-frame tokens and fit inside the scenario")
+    return step
+
+
+def extend_post_anchor_track(scenario, anchor_step, frame_seconds=0.1):
+    """Keep an early-anchored attacker present after contact using fixed velocity.
+
+    The learned reverse trajectory before the anchor is unchanged. This explicit
+    continuation is open-loop, identical for every controller, and is recorded
+    in metadata; it is not an additional model-generated or reactive attack.
+    """
+    state = scenario["tracks"][scenario["metadata"]["new_adv_id"]]["state"]
+    if not bool(state["valid"][anchor_step]):
+        raise ValueError("Generated attacker is invalid at the requested anchor")
+    elapsed = np.arange(1, len(state["valid"]) - anchor_step) * frame_seconds
+    position = np.asarray(state["position"])
+    velocity = np.asarray(state["velocity"])
+    position[anchor_step + 1:, :2] = position[anchor_step, :2] + elapsed[:, None] * velocity[anchor_step, :2]
+    if position.shape[1] > 2:
+        position[anchor_step + 1:, 2:] = position[anchor_step, 2:]
+    velocity[anchor_step + 1:] = velocity[anchor_step]
+    state["heading"][anchor_step + 1:] = state["heading"][anchor_step]
+    state["valid"][anchor_step + 1:] = True
 

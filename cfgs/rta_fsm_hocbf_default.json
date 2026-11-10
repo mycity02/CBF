@@ -32,6 +32,9 @@
     "fsm_exit_h":  1.2,
     "fsm_enter_psi1":  0.5,
     "fsm_exit_psi1":  1,
+    "fsm_closing_speed_epsilon":  0.001,
+    "fsm_barrier_rate_epsilon":  0.001,
+    "fsm_lateral_convergence_product_epsilon":  0.001,
     "fsm_min_dwell_steps":  5,
     "fsm_clear_steps":  3,
     "fsm_recovery_steps":  5,
@@ -45,5 +48,10 @@
     "fsm_brake_acceleration":  -1.5,
     "fsm_brake_ramp_start_steps":  10,
     "fsm_brake_ramp_steps":  20,
-    "fsm_recovery_heading_gain":  1
+    "fsm_recovery_heading_gain":  1,
+    "fsm_corner_road_cbf_max_speed":  2.0,
+    "fsm_road_recovery_max_initial_penetration":  0.25,
+    "fsm_road_recovery_release_h":  0.02,
+    "fsm_road_recovery_acceleration":  1.0,
+    "fsm_road_recovery_curvature_fraction":  0.75
 }
