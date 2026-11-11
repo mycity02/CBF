@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from itertools import combinations
 from typing import Iterable, List, Sequence, Tuple
 
@@ -134,6 +134,7 @@ def solve_prioritized_projection(
     tolerance: float = 1e-7,
     fallback_penalty: float = 1000.0,
     fallback_iterations: int = 120,
+    precondition: bool = False,
 ) -> QPSolution:
     """Project onto all constraints, then relax only non-mandatory constraints.
 
@@ -142,6 +143,25 @@ def solve_prioritized_projection(
     fallback penalty is applied so a large polynomial gradient cannot dominate
     merely because of its numerical scale.
     """
+
+    if precondition:
+        # z=sqrt(W)u makes the tracking Hessian isotropic. Both the constraints
+        # and input box are transformed, so this does not change the QP or its
+        # normalized soft penalty. It avoids slow fallback convergence when
+        # lateral acceleration weighting produces W_kappa proportional to v^4.
+        metric = np.asarray(weights, dtype=float).reshape(2)
+        if np.any(metric <= 0.) or not np.all(np.isfinite(metric)):
+            raise ValueError('QP weights must be positive and finite')
+        root = np.sqrt(metric)
+        transformed = [LinearConstraint(c.coefficients/root, c.lower, c.name, c.kind)
+                       for c in constraints]
+        result = solve_prioritized_projection(
+            np.asarray(reference)*root, np.ones(2), transformed,
+            np.asarray(lower_bounds)*root, np.asarray(upper_bounds)*root,
+            mandatory_kinds, tolerance, fallback_penalty, fallback_iterations,
+            precondition=False,
+        )
+        return replace(result, control=result.control/root)
 
     full_solution = solve_weighted_projection(
         reference=reference,

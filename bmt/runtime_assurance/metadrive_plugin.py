@@ -21,6 +21,7 @@ class MetaDriveCBFPlugin:
         self.config = config or CBFConfig()
         self.filter = self._make_filter(self.config)
         self._last_velocities: Dict[str, np.ndarray] = {}
+        self._last_headings: Dict[str, float] = {}
         self._episode_steps = 0
         self._road_geometry_source = "reference_route"
 
@@ -31,6 +32,10 @@ class MetaDriveCBFPlugin:
         }
         ego = self._ego_vehicle(env)
         self._last_velocities[str(ego.name)] = np.asarray(ego.velocity, dtype=float)[:2].copy()
+        self._last_headings = {
+            str(vehicle.name): float(vehicle.heading_theta)
+            for vehicle in [ego, *self._vehicle_objects(env)]
+        }
         self._episode_steps = 0
         reset_filter = getattr(self.filter, "reset", None)
         if callable(reset_filter):
@@ -109,15 +114,23 @@ class MetaDriveCBFPlugin:
         else:
             acceleration = (velocity - previous) / self.config.dt
         acceleration = _clip_vector_norm(acceleration, self.config.estimated_accel_limit)
+        heading = float(vehicle.heading_theta)
+        previous_heading = self._last_headings.get(name)
+        yaw_rate = 0.0 if previous_heading is None else float(np.arctan2(
+            np.sin(heading - previous_heading), np.cos(heading - previous_heading)
+        ) / self.config.dt)
+        yaw_rate = float(np.clip(yaw_rate, -self.config.estimated_yaw_rate_limit,
+                                 self.config.estimated_yaw_rate_limit))
         return VehicleState2D(
             name=name,
             position=np.asarray(vehicle.position, dtype=float)[:2],
             velocity=velocity,
             acceleration=acceleration,
-            heading=float(vehicle.heading_theta),
+            heading=heading,
             length=float(vehicle.LENGTH),
             width=float(vehicle.WIDTH),
             kind=str(getattr(vehicle, "metadrive_type", "vehicle")),
+            yaw_rate=yaw_rate,
         )
 
     def _road_geometry(self, ego: Any) -> RoadGeometry:
@@ -156,6 +169,7 @@ class MetaDriveCBFPlugin:
     def _side_detector_clearances(
         ego: Any,
         road_heading: float,
+        include_clear_range: bool = False,
     ) -> Tuple[Optional[float], Optional[float]]:
         vehicle_config = getattr(ego, "config", {}) or {}
         detector_config = vehicle_config.get("side_detector", {}) or {}
@@ -192,14 +206,20 @@ class MetaDriveCBFPlugin:
                     np.cos(world_angles - target_angle),
                 )
             )
+            values = []
             for index in np.argsort(angle_errors):
                 error = float(angle_errors[index])
-                if error > np.pi / 3.0:
+                if error > (np.pi / 6.0 + 1e-9 if include_clear_range else np.pi / 3.0):
                     break
                 fraction = float(cloud_points[index])
+                if include_clear_range and np.isfinite(fraction) and 0.0 <= fraction <= 1.0:
+                    # A valid no-hit ray certifies only the surveyed range,
+                    # not an unbounded road. Do not confuse it with sensor failure.
+                    values.append(fraction * distance * max(float(np.cos(error)), 0.0))
                 if np.isfinite(fraction) and 0.0 <= fraction < 0.999:
-                    return fraction * distance * max(float(np.cos(error)), 0.0)
-            return None
+                    if not include_clear_range:
+                        return fraction * distance * max(float(np.cos(error)), 0.0)
+            return min(values) if values else None
 
         return (
             clearance(road_heading + np.pi / 2.0),
@@ -299,9 +319,12 @@ class MetaDriveCBFPlugin:
 
     def _remember_velocities(self, vehicles: Iterable[Any]) -> None:
         current: Dict[str, np.ndarray] = {}
+        headings: Dict[str, float] = {}
         for vehicle in vehicles:
             current[str(vehicle.name)] = np.asarray(vehicle.velocity, dtype=float)[:2].copy()
+            headings[str(vehicle.name)] = float(vehicle.heading_theta)
         self._last_velocities = current
+        self._last_headings = headings
 
 
 def _minimum_clearance(

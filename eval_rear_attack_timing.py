@@ -1,6 +1,7 @@
 """Paired timing smoke tests with attacker-ID and rear-approach telemetry."""
 import argparse
 import json
+import hashlib
 from pathlib import Path
 
 import numpy as np
@@ -12,6 +13,10 @@ from eval_td3_policy_rta import build_rta_plugin, evaluate
 def is_rear_impact_point(longitudinal, lateral, length, width):
     """Rear quarter of the ego body, with a small numerical edge tolerance."""
     return longitudinal <= -.35 * length and abs(lateral) <= .5 * width + .2
+
+
+def file_sha256(path):
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
 class RearAttackAuditEnv:
@@ -134,10 +139,15 @@ def main():
     parser.add_argument('--start_index', type=int, default=0)
     parser.add_argument('--horizon', type=int, default=100)
     parser.add_argument('--device', default='cpu')
-    parser.add_argument('--rta_plugin', default='none', choices=['none', 'fsm_hocbf_qp'])
+    parser.add_argument('--rta_plugin', default='none', choices=['none', 'fsm_hocbf_qp', 'fsm_rear_escape_cbf_qp', 'fsm_rear_physical_guard'])
     parser.add_argument('--rta_config', default=None)
     parser.add_argument('--ttc_threshold', type=float, default=3.0)
     args = parser.parse_args()
+    data_directory = Path(args.eval_data_dir).resolve()
+    source_root = Path(__file__).resolve().parent
+    source_hashes = {str(p.relative_to(source_root)): file_sha256(p)
+                     for p in (source_root / 'bmt/runtime_assurance').glob('*.py')}
+    scenario_hashes = {p.name: file_sha256(p) for p in sorted(data_directory.glob('sd_*.pkl'))}
     destination = Path(args.out)
     if destination.exists():
         raise FileExistsError(f'Refusing to overwrite existing report: {destination}')
@@ -159,6 +169,14 @@ def main():
         report = {'checkpoint': str(Path(args.ckpt_path).resolve()),
                   'eval_data_dir': str(Path(args.eval_data_dir).resolve()),
                   'runtime_assurance': {'plugin': args.rta_plugin, 'config': args.rta_config},
+                  'effective_config': plugin.describe() if plugin is not None else {'name': 'none'},
+                  'reproducibility': {
+                      'checkpoint_sha256': file_sha256(args.ckpt_path),
+                      'controller_source_sha256': source_hashes,
+                      'scenario_sha256': scenario_hashes,
+                      'scenario_hashes_unchanged': bool(scenario_hashes) and all(
+                          file_sha256(data_directory/name) == value for name, value in scenario_hashes.items()),
+                  },
                   'summary': summary, 'episodes': episodes}
         serialized = json.dumps(report, indent=2, ensure_ascii=False)
         destination.parent.mkdir(parents=True, exist_ok=True)

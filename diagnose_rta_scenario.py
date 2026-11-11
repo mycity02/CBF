@@ -230,7 +230,7 @@ def main():
     parser.add_argument("--stochastic", action="store_true")
     parser.add_argument(
         "--rta_plugin",
-        choices=["none", "fsm_hocbf_qp", "predictive_escape_cbf2d"],
+        choices=["none", "fsm_hocbf_qp", "fsm_rear_escape_cbf_qp", "fsm_rear_physical_guard", "predictive_escape_cbf2d"],
         default="fsm_hocbf_qp",
     )
     parser.add_argument("--rta_config", default=None)

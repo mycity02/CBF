@@ -1,0 +1,321 @@
+{
+  "status": "target_not_met_not_promoted",
+  "candidate_config": "cfgs/rta_rear_roadfix_candidate.json",
+  "original_collision_cohort": [
+    0,
+    1,
+    2,
+    4,
+    5,
+    6,
+    8,
+    9,
+    12,
+    13,
+    14,
+    15,
+    16,
+    17
+  ],
+  "requested_clean_recoveries": 10,
+  "actual_clean_recoveries": 4,
+  "challenge": [
+    {
+      "label": "legacy",
+      "report": "rear_escape_legacy_recheck_18.json",
+      "all_collision": 14,
+      "confirmed_rear_collision": 12,
+      "clean_success": 2,
+      "out_of_road": 2,
+      "reward": 37.09236703000301,
+      "completion": 0.5689604145309682,
+      "cohort_clean_success": 0,
+      "cohort_noncollision": 0,
+      "cohort_road_without_collision": 0
+    },
+    {
+      "label": "previous_guard",
+      "report": "rear_guard_v2_challenge_18.json",
+      "all_collision": 13,
+      "confirmed_rear_collision": 10,
+      "clean_success": 4,
+      "out_of_road": 1,
+      "reward": 41.52406772848569,
+      "completion": 0.5969363248380246,
+      "cohort_clean_success": 1,
+      "cohort_noncollision": 2,
+      "cohort_road_without_collision": 1
+    },
+    {
+      "label": "candidate",
+      "report": "rear_guard_v16_aligned_18.json",
+      "all_collision": 8,
+      "confirmed_rear_collision": 6,
+      "clean_success": 7,
+      "out_of_road": 3,
+      "reward": 42.554941470177724,
+      "completion": 0.5915799759142698,
+      "cohort_clean_success": 4,
+      "cohort_noncollision": 6,
+      "cohort_road_without_collision": 2
+    }
+  ],
+  "paired_cohort": [
+    {
+      "scenario": 0,
+      "legacy": "collision",
+      "candidate": "road_violation",
+      "clean_success": false
+    },
+    {
+      "scenario": 1,
+      "legacy": "collision",
+      "candidate": "collision",
+      "clean_success": false
+    },
+    {
+      "scenario": 2,
+      "legacy": "collision",
+      "candidate": "collision",
+      "clean_success": false
+    },
+    {
+      "scenario": 4,
+      "legacy": "collision",
+      "candidate": "road_violation",
+      "clean_success": false
+    },
+    {
+      "scenario": 5,
+      "legacy": "collision",
+      "candidate": "collision",
+      "clean_success": false
+    },
+    {
+      "scenario": 6,
+      "legacy": "collision",
+      "candidate": "collision",
+      "clean_success": false
+    },
+    {
+      "scenario": 8,
+      "legacy": "collision",
+      "candidate": "success",
+      "clean_success": true
+    },
+    {
+      "scenario": 9,
+      "legacy": "collision",
+      "candidate": "collision",
+      "clean_success": false
+    },
+    {
+      "scenario": 12,
+      "legacy": "collision",
+      "candidate": "success",
+      "clean_success": true
+    },
+    {
+      "scenario": 13,
+      "legacy": "collision",
+      "candidate": "success",
+      "clean_success": true
+    },
+    {
+      "scenario": 14,
+      "legacy": "collision",
+      "candidate": "success",
+      "clean_success": true
+    },
+    {
+      "scenario": 15,
+      "legacy": "collision",
+      "candidate": "collision",
+      "clean_success": false
+    },
+    {
+      "scenario": 16,
+      "legacy": "collision",
+      "candidate": "collision",
+      "clean_success": false
+    },
+    {
+      "scenario": 17,
+      "legacy": "collision",
+      "candidate": "collision",
+      "clean_success": false
+    }
+  ],
+  "regression_100": [
+    {
+      "label": "previous_guard",
+      "collision": 0.04,
+      "arrival": 0.88,
+      "road_event_rate": 0.13,
+      "termination_counts": {
+        "success": 88,
+        "road_violation": 8,
+        "collision": 4,
+        "timeout_or_other": 0
+      },
+      "reward": 40.890387571847704,
+      "completion": 0.6857799947020247,
+      "avg_speed_mps": 10.892372279320766,
+      "degenerate_count": 26
+    },
+    {
+      "label": "candidate",
+      "collision": 0.03,
+      "arrival": 0.86,
+      "road_event_rate": 0.13,
+      "termination_counts": {
+        "success": 86,
+        "road_violation": 8,
+        "collision": 3,
+        "timeout_or_other": 3
+      },
+      "reward": 39.685104211947994,
+      "completion": 0.6756912012767899,
+      "avg_speed_mps": 10.519098159903558,
+      "degenerate_count": 26
+    },
+    {
+      "label": "no_rta",
+      "collision": 0.14,
+      "arrival": 0.65,
+      "road_event_rate": 0.31,
+      "termination_counts": {
+        "success": 65,
+        "road_violation": 23,
+        "collision": 12,
+        "timeout_or_other": 0
+      },
+      "reward": 29.041618801220753,
+      "completion": 0.6457273044799944,
+      "avg_speed_mps": 11.607905703464727,
+      "degenerate_count": 26
+    }
+  ],
+  "development_trials": [
+    {
+      "report": "rear_guard_v3_road_18.json",
+      "all_collision": 9,
+      "clean_success": 6,
+      "road_events": 3,
+      "confirmed_rear_collision": 6
+    },
+    {
+      "report": "rear_guard_v4_latched_ttc_18.json",
+      "all_collision": 8,
+      "clean_success": 7,
+      "road_events": 3,
+      "confirmed_rear_collision": 6
+    },
+    {
+      "report": "rear_physical_v4_global_roadfix_18.json",
+      "all_collision": 7,
+      "clean_success": 6,
+      "road_events": 5,
+      "confirmed_rear_collision": 5
+    },
+    {
+      "report": "rear_physical_v5_support_18.json",
+      "all_collision": 8,
+      "clean_success": 3,
+      "road_events": 7,
+      "confirmed_rear_collision": 6
+    },
+    {
+      "report": "rear_guard_v6_fitted_18.json",
+      "all_collision": 10,
+      "clean_success": 6,
+      "road_events": 3,
+      "confirmed_rear_collision": 8
+    },
+    {
+      "report": "rear_guard_v7_soft_18.json",
+      "all_collision": 10,
+      "clean_success": 5,
+      "road_events": 3,
+      "confirmed_rear_collision": 8
+    },
+    {
+      "report": "rear_guard_v8_gain_18.json",
+      "all_collision": 7,
+      "clean_success": 7,
+      "road_events": 4,
+      "confirmed_rear_collision": 6
+    },
+    {
+      "report": "rear_guard_v9_gain_soft_18.json",
+      "all_collision": 9,
+      "clean_success": 5,
+      "road_events": 4,
+      "confirmed_rear_collision": 7
+    },
+    {
+      "report": "rear_guard_v10_separation_18.json",
+      "all_collision": 8,
+      "clean_success": 7,
+      "road_events": 3,
+      "confirmed_rear_collision": 6
+    },
+    {
+      "report": "rear_guard_v11_early_short_18.json",
+      "all_collision": 9,
+      "clean_success": 6,
+      "road_events": 3,
+      "confirmed_rear_collision": 7
+    },
+    {
+      "report": "rear_guard_v12_native_turn_18.json",
+      "all_collision": 6,
+      "clean_success": 7,
+      "road_events": 5,
+      "confirmed_rear_collision": 4
+    },
+    {
+      "report": "rear_guard_v13_emergency_turn_18.json",
+      "all_collision": 6,
+      "clean_success": 6,
+      "road_events": 6,
+      "confirmed_rear_collision": 4
+    },
+    {
+      "report": "rear_guard_v14_corners_18.json",
+      "all_collision": 13,
+      "clean_success": 4,
+      "road_events": 1,
+      "confirmed_rear_collision": 12
+    },
+    {
+      "report": "rear_guard_v15_rejoin_18.json",
+      "all_collision": 8,
+      "clean_success": 7,
+      "road_events": 3,
+      "confirmed_rear_collision": 6
+    },
+    {
+      "report": "rear_guard_v16_aligned_18.json",
+      "all_collision": 8,
+      "clean_success": 7,
+      "road_events": 3,
+      "confirmed_rear_collision": 6
+    }
+  ],
+  "verification": {
+  "pytest_passed": 121,
+  "pytest_native_cases": 12,
+  "unittest_passed": 9,
+  "total_passed": 130,
+  "diff_check_passed": true,
+  "default_configuration_unchanged": true
+},
+  "checks": {
+    "current_controller_source_matches": true,
+    "model_hash_identical": true,
+    "scenario_hashes_identical": true,
+    "scenario_hashes_unchanged": true,
+    "candidate_challenge_and_regression_source_identical": true
+  }
+}

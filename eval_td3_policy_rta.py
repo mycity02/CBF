@@ -34,11 +34,23 @@ def build_rta_plugin(name: str, config_path: Optional[str]):
     from bmt.runtime_assurance.adaptive_plugin import (
         AdaptiveMetaDriveCBFPlugin,
         FSMHOCBFPlugin,
+        RearEscapeCBFPlugin,
     )
     from bmt.runtime_assurance.types import CBFConfig
 
+    if name == 'fsm_rear_physical_guard':
+        from bmt.runtime_assurance.rear_guard import RearPhysicalGuardPlugin
+        root = Path(__file__).resolve().parent
+        physical_path = Path(config_path) if config_path else root/'cfgs/rta_rear_physical.json'
+        with physical_path.open(encoding='utf-8') as stream:
+            physical = CBFConfig.from_mapping(json.load(stream))
+        with (root/'cfgs/rta_fsm_hocbf_default.json').open(encoding='utf-8') as stream:
+            legacy = CBFConfig.from_mapping(json.load(stream))
+        return RearPhysicalGuardPlugin(physical, legacy)
+
     plugin_types = {
         "fsm_hocbf_qp": FSMHOCBFPlugin,
+        "fsm_rear_escape_cbf_qp": RearEscapeCBFPlugin,
         "predictive_escape_cbf2d": AdaptiveMetaDriveCBFPlugin,
     }
     if name not in plugin_types:
@@ -88,6 +100,7 @@ def evaluate(
         nominal_road_violation_steps = 0
         qp_solves = 0
         fsm_transitions = 0
+        rear_barrier_steps = rear_outside_safe_set_steps = 0
 
         episode_speeds_mps = []
         episode_latencies_ms = []
@@ -110,6 +123,8 @@ def evaluate(
                 fallback_counts[fallback_mode] += 1
                 qp_solves += int(rta_info.get("rta_qp_solve_count", 0))
                 fsm_transitions += int(bool(rta_info.get("rta_fsm_transitioned", False)))
+                rear_barrier_steps += int(rta_info.get("rta_rear_barrier_count", 0) > 0)
+                rear_outside_safe_set_steps += int(rta_info.get("rta_rear_outside_safe_set_count", 0) > 0)
                 min_vehicle_h = _running_min(min_vehicle_h, rta_info["rta_min_vehicle_h"])
                 min_road_h = _running_min(min_road_h, rta_info["rta_min_road_h"])
                 min_effective_road_h = _running_min(
@@ -193,6 +208,8 @@ def evaluate(
                     ),
                     "rta_qp_solves": qp_solves,
                     "rta_fsm_transitions": fsm_transitions,
+                    "rta_rear_barrier_steps": rear_barrier_steps,
+                    "rta_rear_outside_safe_set_steps": rear_outside_safe_set_steps,
                     **latency_stats(
                         episode_latencies_ms,
                         deadline_ms=1000.0 * step_seconds,
@@ -271,6 +288,8 @@ def _summarize(
                 "rta_fallback_counts": dict(fallback_counts),
                 "rta_avg_qp_solves": mean("rta_qp_solves"),
                 "rta_avg_fsm_transitions": mean("rta_fsm_transitions"),
+                "rta_rear_barrier_steps": sum(e.get("rta_rear_barrier_steps", 0) for e in episodes),
+                "rta_rear_outside_safe_set_steps": sum(e.get("rta_rear_outside_safe_set_steps", 0) for e in episodes),
                 **latency_stats(
                     rta_latency_samples_ms or [],
                     deadline_ms=deadline_ms,
@@ -329,7 +348,7 @@ def main():
     parser.add_argument("--stochastic", action="store_true")
     parser.add_argument(
         "--rta_plugin",
-        choices=["none", "fsm_hocbf_qp", "predictive_escape_cbf2d"],
+        choices=["none", "fsm_hocbf_qp", "fsm_rear_escape_cbf_qp", "fsm_rear_physical_guard", "predictive_escape_cbf2d"],
         default="fsm_hocbf_qp",
     )
     parser.add_argument("--rta_config", default=None, help="Optional JSON override for CBFConfig")

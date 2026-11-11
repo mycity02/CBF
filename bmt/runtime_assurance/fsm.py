@@ -305,6 +305,7 @@ class FSMHOCBF(TwoDimensionalCBF):
             assessment,
             nominal_curvature=nominal_control.curvature,
         )
+        self._prepare_maneuver(ego, sensor_obstacles, road, decision)
 
         # Road safety is independent of traffic-threat activation. Evaluate
         # the instantaneous road HOCBF constraints on every control step so a
@@ -325,6 +326,10 @@ class FSMHOCBF(TwoDimensionalCBF):
             or item.diagnostic.psi1 <= self.config.road_activation_psi1
             for item in road_barriers
         )
+        if self.config.rear_use_native_dynamics:
+            # The physical profile must not let a vehicle-risk correction
+            # bypass road constraints simply because the current clearance is large.
+            road_guard_active = True
         road_recovery = self._road_recovery_reference(
             nominal_control,
             ego,
@@ -358,10 +363,15 @@ class FSMHOCBF(TwoDimensionalCBF):
 
         inactive_passthrough = (
             self.config.passthrough_without_active_obstacle
+            and self._allow_inactive_passthrough()
             and not active_obstacles
             and decision.state is FSMState.NOMINAL
             and (not road_guard_active or road_nominal_safe)
             and road_recovery.reference is None
+            and (not self.config.rear_use_native_dynamics or (
+                self.config.min_acceleration <= nominal_control.acceleration <= self.config.max_acceleration
+                and abs(nominal_control.curvature) <= self.config.max_curvature
+            ))
         )
         if inactive_passthrough:
             return FilterResult(
@@ -464,6 +474,7 @@ class FSMHOCBF(TwoDimensionalCBF):
             tolerance=self.config.constraint_tolerance,
             fallback_penalty=self.config.fallback_penalty,
             fallback_iterations=self.config.fallback_iterations,
+            precondition=self.config.qp_preconditioned_fallback,
         )
         if road_recovery.use_envelope and not solution.hard_feasible:
             vehicle_priority = True
@@ -490,6 +501,7 @@ class FSMHOCBF(TwoDimensionalCBF):
                 tolerance=self.config.constraint_tolerance,
                 fallback_penalty=self.config.fallback_penalty,
                 fallback_iterations=self.config.fallback_iterations,
+                precondition=self.config.qp_preconditioned_fallback,
             )
         safe_control = Control2D.from_array(solution.control)
         diagnostics = self._executed_diagnostics(
@@ -538,6 +550,12 @@ class FSMHOCBF(TwoDimensionalCBF):
             fsm_right_margin=decision.right_margin,
             qp_solve_count=1,
         )
+
+    def _prepare_maneuver(self, ego, obstacles, road, decision) -> None:
+        """Optional extension point; the legacy filter changes no state here."""
+
+    def _allow_inactive_passthrough(self) -> bool:
+        return True
 
     def _current_active_obstacles(
         self,
@@ -944,6 +962,11 @@ class FSMHOCBF(TwoDimensionalCBF):
         if not use_corner_barriers:
             return super()._road_barriers(ego, road)
 
+        return self._corner_road_barriers(ego, road)
+
+    def _corner_road_barriers(self, ego, road) -> List[_Barrier]:
+        """First-order corner constraints including the footprint yaw term."""
+
         heading = ego.heading_vector
         left_heading = np.asarray([-heading[1], heading[0]], dtype=float)
         corner_specs = []
@@ -1240,6 +1263,8 @@ class FSMHOCBF(TwoDimensionalCBF):
                     nominal_h=nominal_h,
                     effective_h=effective_h,
                     effective_residual=residual,
+                    control_coefficients=item.constraint.coefficients.tolist(),
+                    lower_bound=float(item.constraint.lower),
                 )
             )
         return diagnostics

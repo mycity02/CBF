@@ -83,9 +83,42 @@ class CBFConfig:
     constraint_tolerance: float = 1e-7
     intervention_tolerance: float = 1e-3
     estimated_accel_limit: float = 12.0
+    estimated_yaw_rate_limit: float = 6.0
+    rear_normal_bias: float = 4.0
+    rear_relative_accel_scale: float = 3.0
+    rear_yaw_rate_uncertainty: float = 0.10
+    rear_escape_position_gain: float = 1.5
+    rear_escape_damping: float = 2.5
+    rear_escape_target_buffer: float = 0.10
+    rear_min_lateral_shift: float = 0.75
+    rear_velocity_barrier_enabled: bool = False
+    rear_use_native_dynamics: bool = False
+    rear_max_lateral_acceleration: float = 5.0
+    rear_use_acceleration_metric: bool = False
+    rear_lateral_acceleration_weight: float = 1.0
+    qp_preconditioned_fallback: bool = False
+    rear_velocity_road_barriers: bool = False
+    rear_guard_road_entry_slack: float = 0.0
+    rear_use_physical_road_geometry: bool = False
+    rear_latched_corridor: bool = False
+    rear_trigger_ttc: float = 0.0
+    rear_fit_boundary_normals: bool = False
+    rear_hocbf_gain: float = 0.0
+    rear_guard_allow_slow_approach: bool = False
+    rear_corner_boundary_sensing: bool = False
+    rear_return_to_reference: bool = False
+    rear_require_aligned_heading: bool = False
 
     def __post_init__(self):
         positive = {
+            "estimated_yaw_rate_limit": self.estimated_yaw_rate_limit,
+            "rear_normal_bias": self.rear_normal_bias,
+            "rear_relative_accel_scale": self.rear_relative_accel_scale,
+            "rear_escape_position_gain": self.rear_escape_position_gain,
+            "rear_escape_damping": self.rear_escape_damping,
+            "rear_min_lateral_shift": self.rear_min_lateral_shift,
+            "rear_max_lateral_acceleration": self.rear_max_lateral_acceleration,
+            "rear_lateral_acceleration_weight": self.rear_lateral_acceleration_weight,
             "dt": self.dt,
             "alpha1": self.alpha1,
             "alpha2": self.alpha2,
@@ -114,6 +147,11 @@ class CBFConfig:
         if self.min_acceleration >= self.max_acceleration:
             raise ValueError("min_acceleration must be less than max_acceleration")
         nonnegative = {
+            "rear_hocbf_gain": self.rear_hocbf_gain,
+            "rear_trigger_ttc": self.rear_trigger_ttc,
+            "rear_guard_road_entry_slack": self.rear_guard_road_entry_slack,
+            "rear_yaw_rate_uncertainty": self.rear_yaw_rate_uncertainty,
+            "rear_escape_target_buffer": self.rear_escape_target_buffer,
             "activation_h_threshold": self.activation_h_threshold,
             "activation_longitudinal_buffer": self.activation_longitudinal_buffer,
             "activation_lateral_buffer": self.activation_lateral_buffer,
@@ -201,6 +239,7 @@ class VehicleState2D:
     length: float
     width: float
     kind: str = "vehicle"
+    yaw_rate: float = 0.0
 
     def __post_init__(self):
         object.__setattr__(self, "position", _vector2(self.position, "position"))
@@ -211,6 +250,8 @@ class VehicleState2D:
         object.__setattr__(self, "kind", str(self.kind).lower())
         if self.length <= 0 or self.width <= 0:
             raise ValueError("vehicle length and width must be positive")
+        if not np.isfinite(self.yaw_rate):
+            raise ValueError("yaw_rate must be finite")
 
     @property
     def speed(self) -> float:
@@ -232,6 +273,10 @@ class RoadGeometry:
     heading: float
     left_clearance: Optional[float]
     right_clearance: Optional[float]
+    left_inward_normal: Optional[np.ndarray] = None
+    right_inward_normal: Optional[np.ndarray] = None
+    corner_boundaries: Optional[Dict[str, Any]] = None
+    reference_lateral_error: Optional[float] = None
 
     @property
     def tangent(self) -> np.ndarray:
@@ -253,6 +298,11 @@ class BarrierDiagnostic:
     nominal_h: Optional[float] = None
     effective_h: Optional[float] = None
     effective_residual: Optional[float] = None
+    barrier_model: str = "hocbf"
+    geometric_gap: Optional[float] = None
+    steering_coefficient: Optional[float] = None
+    control_coefficients: Optional[List[float]] = None
+    lower_bound: Optional[float] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
