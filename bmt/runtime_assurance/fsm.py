@@ -151,7 +151,13 @@ class SafetySupervisorFSM:
                 if previous is FSMState.ESCAPE_LEFT
                 else assessment.right_margin
             )
-            if selected_margin < self.config.fsm_min_side_margin:
+            if (self.config.rear_release_completed_escape and assessment.rear_clear
+                    and not assessment.rear_threat
+                    and self.state_age_steps >= self.config.fsm_min_dwell_steps):
+                next_state = FSMState.BRAKE if assessment.front_threat else FSMState.RECOVERY
+                reason = ('rear_clear_front_brake' if assessment.front_threat else
+                          'rear_clear_physical_recovery')
+            elif selected_margin < self.config.fsm_min_side_margin:
                 if assessment.rear_threat or assessment.front_threat:
                     next_state, reason = self._select_escape(
                         assessment,

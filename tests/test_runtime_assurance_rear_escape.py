@@ -286,3 +286,77 @@ def test_crossing_vehicle_behind_is_not_a_following_rear_attacker():
     assert cbf._rear_candidates(ego, [cross], RoadGeometry(0., 5., 5.)) == []
     # Classification does not delete the actor from the generic vehicle CBF path.
     assert cbf._vehicle_barrier(ego, cross, RoadGeometry(0., 5., 5.)).diagnostic.kind == 'vehicle'
+
+
+def test_longitudinal_reserve_avoids_unnecessary_rear_escape_without_removing_cbf():
+    cfg = config(rear_prefer_longitudinal_viability=True, rear_velocity_barrier_enabled=False,
+                 rear_trigger_ttc=3., road_margin=.05)
+    cbf = RearEscapeCBF(cfg)
+    ego, rear = car('e', 0., 0., 10.), car('r', -11., 0., 10.5)
+    result = cbf.filter(Control2D(1., 0.), ego, [rear], RoadGeometry(0., 5., 5.))
+    assert cbf._rear_longitudinal_hold
+    assert result.mode == 'nominal'
+    assert any(b.name == 'vehicle:r' for b in result.diagnostics)
+    assert result.qp_solve_count == 1
+    assert result.hard_feasible
+
+
+def test_urgent_rear_or_front_conflict_does_not_enable_longitudinal_hold():
+    cfg = config(rear_prefer_longitudinal_viability=True, rear_velocity_barrier_enabled=False,
+                 rear_trigger_ttc=3., road_margin=.05)
+    cbf = RearEscapeCBF(cfg)
+    ego, fast = car('e', 0., 0., 10.), car('r', -11., 0., 20.)
+    result = cbf.filter(Control2D(1., 0.), ego, [fast], RoadGeometry(0., 5., 5.))
+    assert not cbf._rear_longitudinal_hold
+    assert result.mode in ('escape_left', 'escape_right')
+    slow, front = car('r', -11., 0., 10.5), car('f', 7., 0., 0.)
+    assert not cbf._longitudinal_hold_is_feasible(ego, [slow], [slow, front], RoadGeometry(0., 5., 5.))
+
+
+def test_longitudinal_hold_requires_acceleration_reserve_and_respects_commitment():
+    cfg = config(rear_prefer_longitudinal_viability=True, rear_velocity_barrier_enabled=False,
+                 rear_trigger_ttc=3., road_margin=.05)
+    cbf = RearEscapeCBF(cfg)
+    ego, slow = car('e', 0., 0., 10.), car('r', -11., 0., 10.5)
+    road = RoadGeometry(0., 5., 5.)
+    assert cbf._longitudinal_hold_is_feasible(ego, [slow], [slow], road)
+    accelerating = replace(slow, acceleration=np.array([5., 0.]))
+    assert not cbf._longitudinal_hold_is_feasible(ego, [accelerating], [accelerating], road)
+    cbf.supervisor.state = FSMState.ESCAPE_LEFT
+    assert not cbf._longitudinal_hold_is_feasible(ego, [slow], [slow], road)
+
+
+def test_frenet_escape_tracks_road_offset_not_old_world_position():
+    cfg = config(rear_frenet_escape=True, rear_velocity_barrier_enabled=False,
+                 rear_latched_corridor=True, rear_use_native_dynamics=True)
+    cbf = RearEscapeCBF(cfg)
+    cbf.supervisor.state = FSMState.ESCAPE_LEFT
+    cbf._escape_target = np.array([0., 3.2])
+    cbf._escape_axis = np.array([0., 1.])
+    cbf._escape_lateral_target = 3.2
+    # Far along a curved road, the same lateral target has already been reached.
+    # Current velocity is tangent to this road, not to the initial world axis.
+    road = RoadGeometry(.5, 5., 5., reference_lateral_error=-3.2, reference_curvature=.02)
+    ego = car('e', 80., 30., 10., .5)
+    reference = cbf._reference_for_state(FSMState.ESCAPE_LEFT, Control2D(1., 0.), ego, road)
+    np.testing.assert_allclose(reference.curvature, .02, atol=1e-10)
+    # A global translation must not change the control at the same Frenet state.
+    shifted = replace(ego, position=ego.position+np.array([200., -150.]))
+    np.testing.assert_allclose(cbf._reference_for_state(FSMState.ESCAPE_LEFT, Control2D(1., 0.),
+                                                       shifted, road).as_array(), reference.as_array())
+    cbf.reset()
+    assert cbf._escape_lateral_target is None
+
+
+def test_cleared_rear_maneuver_transitions_to_front_brake_without_dropping_constraints():
+    from bmt.runtime_assurance.fsm import SafetySupervisorFSM, ThreatAssessment
+    supervisor = SafetySupervisorFSM(config(rear_release_completed_escape=True))
+    supervisor.state, supervisor.state_age_steps = FSMState.ESCAPE_LEFT, 10
+    assessment = ThreatAssessment(front_threat=True, rear_threat=False, front_clear=False,
+                                  rear_clear=True, left_margin=1., right_margin=1.)
+    decision = supervisor.update(assessment, 0.)
+    assert decision.state is FSMState.BRAKE
+    assert decision.reason == 'rear_clear_front_brake'
+    supervisor.state = FSMState.ESCAPE_LEFT
+    decision = supervisor.update(replace(assessment, rear_threat=True, rear_clear=False), 0.)
+    assert decision.state is FSMState.ESCAPE_LEFT

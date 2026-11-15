@@ -172,13 +172,20 @@ class RearEscapeCBFPlugin(MetaDriveCBFPlugin):
                 if self.config.rear_fit_boundary_normals else RoadGeometry(heading, left, right))
         if self.config.rear_corner_boundary_sensing:
             road = self._corner_boundary_geometry(ego, road)
-        if self.config.rear_return_to_reference:
+        if self.config.rear_return_to_reference or self.config.rear_frenet_escape:
             try:
                 trajectory = navigation.reference_trajectory
                 longitudinal, _ = trajectory.local_coordinates(ego.position)
                 center = trajectory.position(longitudinal, 0.)
                 error = float((np.asarray(center)[:2]-np.asarray(ego.position)[:2])@road.left_normal)
                 road = replace(road, reference_lateral_error=error)
+                if self.config.rear_frenet_escape:
+                    # Local spatial geometry, not a future-state rollout.
+                    lo, hi = max(0., longitudinal-1.), min(float(trajectory.length), longitudinal+1.)
+                    if hi-lo > 1e-6:
+                        delta = float(trajectory.heading_theta_at(hi)-trajectory.heading_theta_at(lo))
+                        curvature = float(np.arctan2(np.sin(delta), np.cos(delta))/(hi-lo))
+                        road = replace(road, reference_curvature=curvature)
             except (AttributeError, TypeError, ValueError):
                 pass
         return road
@@ -362,4 +369,6 @@ class RearEscapeCBFPlugin(MetaDriveCBFPlugin):
         telemetry["rta_rear_complete_lateral_corridor"] = bool(self.filter._escape_complete_corridor)
         target = self.filter._escape_target
         telemetry['rta_escape_target'] = None if target is None else target.tolist()
+        telemetry['rta_rear_longitudinal_hold'] = bool(self.filter._rear_longitudinal_hold)
+        telemetry['rta_escape_lateral_target'] = self.filter._escape_lateral_target
         return action, telemetry

@@ -108,6 +108,14 @@ class CBFConfig:
     rear_corner_boundary_sensing: bool = False
     rear_return_to_reference: bool = False
     rear_require_aligned_heading: bool = False
+    rear_guard_consistent_handoff: bool = False
+    rear_guard_risk_gated: bool = False
+    rear_prefer_longitudinal_viability: bool = False
+    rear_longitudinal_reserve_fraction: float = 0.25
+    rear_hold_min_ttc: float = 2.5
+    rear_frenet_escape: bool = False
+    rear_release_completed_escape: bool = False
+    rear_guard_correct_road_domain: bool = False
 
     def __post_init__(self):
         positive = {
@@ -147,6 +155,8 @@ class CBFConfig:
         if self.min_acceleration >= self.max_acceleration:
             raise ValueError("min_acceleration must be less than max_acceleration")
         nonnegative = {
+            "rear_longitudinal_reserve_fraction": self.rear_longitudinal_reserve_fraction,
+            "rear_hold_min_ttc": self.rear_hold_min_ttc,
             "rear_hocbf_gain": self.rear_hocbf_gain,
             "rear_trigger_ttc": self.rear_trigger_ttc,
             "rear_guard_road_entry_slack": self.rear_guard_road_entry_slack,
@@ -184,6 +194,8 @@ class CBFConfig:
         for name, value in nonnegative.items():
             if value < 0:
                 raise ValueError(f"{name} must be nonnegative, got {value}")
+        if self.rear_longitudinal_reserve_fraction >= 1.:
+            raise ValueError('rear_longitudinal_reserve_fraction must be less than one')
         if self.road_low_speed_min_outward_heading_component >= 1.0:
             raise ValueError(
                 "road_low_speed_min_outward_heading_component must be less than 1"
@@ -277,6 +289,7 @@ class RoadGeometry:
     right_inward_normal: Optional[np.ndarray] = None
     corner_boundaries: Optional[Dict[str, Any]] = None
     reference_lateral_error: Optional[float] = None
+    reference_curvature: Optional[float] = None
 
     @property
     def tangent(self) -> np.ndarray:

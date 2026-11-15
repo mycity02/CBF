@@ -54,11 +54,14 @@ class RearEscapeCBF(FSMHOCBF):
         self._rear_axes = {}
         self._rear_modes = {}
         self._escape_target = None
+        self._escape_lateral_target = None
         self._escape_axis = None
         self._escape_attacker = None
         self._escape_complete_corridor = False
         self._step_rears = None
         self._rear_recovery_pending = False
+        self._rear_longitudinal_hold = False
+        self._rear_guard_release = False
 
     def filter(self, nominal_control, ego, obstacles, road):
         self._step_rears = None
@@ -181,7 +184,10 @@ class RearEscapeCBF(FSMHOCBF):
                 and self._escape_target is not None):
             # Assess the REMAINING path to the fixed target. Requiring a new
             # >=0.75 m displacement each frame falsely cancels an ongoing escape.
-            target = max(0., direction*float((self._escape_target-ego.position)@road.left_normal))
+            if self._escape_lateral_target is not None and road.reference_lateral_error is not None:
+                target = max(0., direction*(self._escape_lateral_target+road.reference_lateral_error))
+            else:
+                target = max(0., direction*float((self._escape_target-ego.position)@road.left_normal))
             clearance = road.left_clearance if direction > 0 else road.right_clearance
             available = (float('inf') if clearance is None else
                          clearance-ego.width/2.-self.config.road_margin)
@@ -242,9 +248,13 @@ class RearEscapeCBF(FSMHOCBF):
             self._escape_complete_corridor = distance >= required - 1e-6
             self._escape_axis = road.left_normal.copy()
             self._escape_target = ego.position + direction * distance * self._escape_axis
+            self._escape_lateral_target = (
+                -road.reference_lateral_error+direction*distance
+                if self.config.rear_frenet_escape and road.reference_lateral_error is not None else None)
             self._escape_attacker = min(rears, key=lambda r: np.linalg.norm(r.position - ego.position)).name
         elif not escaping:
             self._escape_target = self._escape_axis = self._escape_attacker = None
+            self._escape_lateral_target = None
             self._escape_complete_corridor = False
 
     def _assess_threats(self, ego, active_obstacles, sensor_obstacles, road, nominal_control):
@@ -259,14 +269,68 @@ class RearEscapeCBF(FSMHOCBF):
                            and self._rear_ttc(ego, other, road) > 1.2*self.config.rear_trigger_ttc
                            for other, b in zip(rears, rear_diagnostics)),
         )
+        self._rear_longitudinal_hold = self._longitudinal_hold_is_feasible(
+            ego, rears, active_obstacles, road)
+        if self._rear_longitudinal_hold:
+            # This only suppresses an unnecessary lateral intent. Every active
+            # vehicle and road CBF remains in the same downstream safety QP.
+            assessment = replace(assessment, rear_threat=False, rear_clear=True)
+        released = self.config.rear_release_completed_escape and self._rear_guard_release
+        if released:
+            assessment = replace(assessment, rear_threat=False, rear_clear=True)
         if self._escape_target is not None:
             direction = 1.0 if self.supervisor.state is FSMState.ESCAPE_LEFT else -1.0
-            remaining = direction * float((self._escape_target - ego.position) @ self._escape_axis)
+            if self._escape_lateral_target is not None and road.reference_lateral_error is not None:
+                remaining = direction*(self._escape_lateral_target+road.reference_lateral_error)
+            else:
+                remaining = direction * float((self._escape_target - ego.position) @ self._escape_axis)
             approaching = any(other.name == self._escape_attacker
                               for other in self._rear_candidates(ego, sensor_obstacles, road))
-            if approaching and remaining > self.config.rear_escape_target_buffer:
-                assessment = replace(assessment, rear_threat=True, rear_clear=False)
+            if (approaching and remaining > self.config.rear_escape_target_buffer
+                    and not self._rear_longitudinal_hold):
+                if not released:
+                    assessment = replace(assessment, rear_threat=True, rear_clear=False)
         return assessment
+
+    def _longitudinal_hold_is_feasible(self, ego, rears, obstacles, road):
+        """Algebraic current-state input interval, not action search or rollout.
+
+        Check a road-aligned steering feedback and intersect all active CBF
+        half-spaces along the acceleration axis. Require an initial CBF-safe
+        rear state, a closing-time buffer and unused acceleration authority.
+        This is NOT a finite-horizon viability or reachability guarantee.
+        """
+        if not self.config.rear_prefer_longitudinal_viability or not rears:
+            return False
+        # Do not abandon an already committed escape just because a single
+        # current-state acceleration interval reopens during the maneuver.
+        if self.supervisor.state in (FSMState.ESCAPE_LEFT, FSMState.ESCAPE_RIGHT, FSMState.RECOVERY):
+            return False
+        reserve_upper = self.config.max_acceleration*(1.-self.config.rear_longitudinal_reserve_fraction)
+        for other in rears:
+            d = self._vehicle_barrier(ego, other, road).diagnostic
+            if d.h < 0. or d.psi1 < 0. or self._rear_ttc(ego, other, road) <= self.config.rear_hold_min_ttc:
+                return False
+            if float(other.acceleration@road.tangent)+self.config.other_accel_uncertainty > reserve_upper:
+                return False
+        heading_error = np.arctan2(np.sin(ego.heading-road.heading), np.cos(ego.heading-road.heading))
+        curvature = float(np.clip(-self.config.fsm_recovery_heading_gain*heading_error/max(ego.speed, 1.),
+                                  -self.config.max_curvature, self.config.max_curvature))
+        barriers = [self._vehicle_barrier(ego, other, road) for other in obstacles]
+        if self.config.enforce_road_barriers:
+            barriers.extend(self._road_barriers(ego, road))
+        lower, upper = self.config.min_acceleration, self.config.max_acceleration
+        for b in barriers:
+            ca, ck = b.constraint.coefficients
+            residual_lower = float(b.constraint.lower-ck*curvature)
+            if abs(ca) < 1e-10:
+                if residual_lower > self.config.constraint_tolerance:
+                    return False
+            elif ca > 0.:
+                lower = max(lower, residual_lower/ca)
+            else:
+                upper = min(upper, residual_lower/ca)
+        return lower <= min(upper, reserve_upper)-self.config.constraint_tolerance
 
     def _current_active_obstacles(self, ego, obstacles, road):
         active = super()._current_active_obstacles(ego, obstacles, road)
@@ -432,13 +496,17 @@ class RearEscapeCBF(FSMHOCBF):
     def _reference_for_state(self, state, nominal, ego, road, assessment=None):
         if (state in (FSMState.ESCAPE_LEFT, FSMState.ESCAPE_RIGHT)
                 and self._escape_target is not None):
-            error = float((self._escape_target - ego.position) @ self._escape_axis)
-            lateral_speed = float(ego.velocity @ self._escape_axis)
+            frenet = self._escape_lateral_target is not None and road.reference_lateral_error is not None
+            axis = road.left_normal if frenet else self._escape_axis
+            error = (self._escape_lateral_target+road.reference_lateral_error if frenet else
+                     float((self._escape_target - ego.position) @ axis))
+            lateral_speed = float(ego.velocity @ axis)
             lateral_acceleration = (self.config.rear_escape_position_gain * error
                                     - self.config.rear_escape_damping * lateral_speed)
             left = np.array([-ego.heading_vector[1], ego.heading_vector[0]])
-            authority = max(float(left @ self._escape_axis), 0.20)
-            curvature = lateral_acceleration / (max(ego.speed ** 2, 1.0) * authority)
+            authority = max(float(left @ axis), 0.20)
+            feedforward = float(road.reference_curvature or 0.) if frenet else 0.
+            curvature = feedforward+lateral_acceleration / (max(ego.speed ** 2, 1.0) * authority)
             limit = self.config.max_curvature * self.config.escape_curvature_fraction
             return Control2D(nominal.acceleration, float(np.clip(curvature, -limit, limit)))
         if (self.config.rear_return_to_reference and self._rear_recovery_pending
@@ -449,7 +517,8 @@ class RearEscapeCBF(FSMHOCBF):
                                                 - self.config.rear_escape_damping*lateral_speed, -2., 2.))
             left = np.array([-ego.heading_vector[1], ego.heading_vector[0]])
             authority = max(float(left@road.left_normal), .2)
-            curvature = lateral_acceleration/(max(ego.speed**2, 1.)*authority)
+            feedforward = float(road.reference_curvature or 0.) if self.config.rear_frenet_escape else 0.
+            curvature = feedforward+lateral_acceleration/(max(ego.speed**2, 1.)*authority)
             return Control2D(nominal.acceleration,
                              float(np.clip(curvature, -self.config.max_curvature, self.config.max_curvature)))
         return super()._reference_for_state(state, nominal, ego, road, assessment)

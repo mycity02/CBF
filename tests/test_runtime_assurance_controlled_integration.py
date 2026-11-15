@@ -13,8 +13,18 @@ import pytest
 @pytest.mark.parametrize('speed,rear_speed', [(.5, 5.5), (3., 8.), (10., 15.)])
 @pytest.mark.parametrize('config', ['cfgs/rta_rear_physical.json', 'cfgs/rta_rear_physical_v4.json',
                                    'cfgs/rta_rear_physical_v15_rejoin.json',
-                                   'cfgs/rta_rear_physical_v16_aligned.json'])
-def test_known_avoidable_rear_case_passes_with_real_vehicle_physics(speed, rear_speed, config):
+                                   'cfgs/rta_rear_physical_v16_aligned.json',
+                                   'cfgs/rta_efficiency_v5_native_drive.json',
+                                   'cfgs/rta_efficiency_v12_low_speed_domain.json',
+                                   'cfgs/rta_efficiency_v13_native_w1.json'])
+def test_known_avoidable_rear_case_passes_with_real_vehicle_physics(speed, rear_speed, config, request):
+    if speed == .5 and config in ('cfgs/rta_efficiency_v5_native_drive.json',
+                                  'cfgs/rta_efficiency_v12_low_speed_domain.json'):
+        # These experiments were rejected after real rear impacts. Keep running
+        # the original strict assertions as expected regressions, not weakened
+        # safety gates. An unexpected pass must prompt a fresh promotion audit.
+        request.applymarker(pytest.mark.xfail(strict=True,
+            reason='Rejected efficiency prototype: known low-speed rear collision; do not deploy'))
     root = Path(__file__).resolve().parents[1]
     # pytest's private Windows temp-directory ACLs can exclude a sandboxed
     # Python process. Use a unique, non-overwriting report in the workspace

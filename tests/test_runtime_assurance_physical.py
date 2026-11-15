@@ -294,3 +294,104 @@ def test_procedural_road_frame_does_not_rotate_with_ego_heading():
     assert plugin._road_geometry(ego).heading == 0.
     # Existing profiles retain their previous convention.
     assert RearEscapeCBFPlugin(physical_config())._road_geometry(ego).heading == .3
+
+
+def test_guard_handoff_checks_destination_road_geometry(monkeypatch):
+    ego, rear = native_car(), native_car(15.)
+    rear.name, rear.position = 'rear', np.array([-12., 0.])
+    env = guard_env(ego, [rear])
+    guard = RearPhysicalGuardPlugin(physical_config(rear_guard_consistent_handoff=True),
+                                    CBFConfig(road_margin=.05))
+    guard.reset(env)
+    guard.filter_action(env, np.array([0., 0.]))
+    assert guard.active
+    rear.position = np.array([25., 0.])
+    # Physical road is clear, but the receiving legacy controller would use
+    # an artificial road edge cutting through the ego body. Do not switch.
+    monkeypatch.setattr(guard.physical, '_road_geometry', lambda obj: RoadGeometry(0., 5., 5.))
+    monkeypatch.setattr(guard.legacy, '_road_geometry', lambda obj: RoadGeometry(0., -.5, 5.))
+    for _ in range(guard.config.fsm_clear_steps+1):
+        _, telemetry = guard.filter_action(env, np.array([0., 0.]))
+    assert guard.active
+    assert not telemetry['rta_handoff_safe']
+    assert telemetry['rta_handoff_min_road_h'] < 0.
+    monkeypatch.setattr(guard.legacy, '_road_geometry', lambda obj: RoadGeometry(0., 5., 5.))
+    for _ in range(guard.config.fsm_clear_steps):
+        guard.filter_action(env, np.array([0., 0.]))
+    assert not guard.active
+
+
+def test_long_closing_ttc_does_not_request_full_physical_escape():
+    ego, rear = native_car(), native_car(10.3)
+    rear.name, rear.position = 'rear', np.array([-10., 0.])
+    env = guard_env(ego, [rear])
+    gated = RearPhysicalGuardPlugin(physical_config(rear_guard_risk_gated=True, rear_trigger_ttc=3.),
+                                    CBFConfig(road_margin=.05))
+    original = RearPhysicalGuardPlugin(physical_config(rear_trigger_ttc=3.), CBFConfig(road_margin=.05))
+    gated.reset(env)
+    original.reset(env)
+    _, metadata = gated.filter_action(env, np.array([0., 0.]))
+    original.filter_action(env, np.array([0., 0.]))
+    assert original.active and not gated.active
+    assert metadata['rta_rear_guard_reason'] == 'legacy_nonurgent_rear_risk'
+    assert metadata['rta_enabled']
+    assert metadata['rta_selected_plugin'] == 'fsm_hocbf_qp'
+    rear.velocity = np.array([15., 0.])
+    _, metadata = gated.filter_action(env, np.array([0., 0.]))
+    assert gated.active
+
+
+def test_nominal_drive_limit_is_native_not_a_fixed_three_mps2_cap():
+    ego = native_car()
+    ego.config['max_engine_force'] = 900.
+    plugin = RearEscapeCBFPlugin(physical_config(max_acceleration=4.))
+    runtime = plugin._runtime_config(.3, ego)
+    np.testing.assert_allclose(runtime.max_acceleration, 4.*900./ego.MASS)
+    nominal, limit = plugin._action_to_control(np.array([0., 1.]), ego)
+    action = plugin._control_to_action(Control2D(runtime.max_acceleration, 0.), ego, limit)
+    np.testing.assert_allclose(action[1], 1.)
+
+
+def test_frenet_geometry_reads_local_route_curvature_and_lateral_offset():
+    ego = sensed_trajectory_car(np.ones(12))
+    ego.position = np.array([4., 7.])
+    # The heading derivative crosses the angle wrap; curvature stays +0.01/m.
+    trajectory = SimpleNamespace(length=100., local_coordinates=lambda position: (10., 2.),
+        position=lambda longitudinal, lateral: np.array([4., 5.]),
+        heading_theta_at=lambda longitudinal: np.arctan2(
+            np.sin(np.pi-.1+.01*longitudinal), np.cos(np.pi-.1+.01*longitudinal)))
+    ego.navigation.reference_trajectory = trajectory
+    plugin = RearEscapeCBFPlugin(physical_config(rear_use_physical_road_geometry=True,
+                                                rear_frenet_escape=True))
+    road = plugin._road_geometry(ego)
+    np.testing.assert_allclose(road.reference_lateral_error, -2.)
+    np.testing.assert_allclose(road.reference_curvature, .01, atol=1e-10)
+
+
+def test_valid_physical_road_can_correct_artificial_legacy_fail_stop(monkeypatch):
+    ego = native_car(1.)
+    env = guard_env(ego)
+    guard = RearPhysicalGuardPlugin(physical_config(rear_guard_correct_road_domain=True,
+                                                    rear_guard_consistent_handoff=True,
+                                                    rear_use_physical_road_geometry=True),
+                                    CBFConfig(road_margin=.05))
+    guard.reset(env)
+    monkeypatch.setattr(guard.physical, '_road_geometry', lambda obj: RoadGeometry(0., 5., 5.))
+    monkeypatch.setattr(guard.legacy, '_road_geometry', lambda obj: RoadGeometry(0., -.5, 5.))
+    _, telemetry = guard.filter_action(env, np.array([0., .5]))
+    assert guard.active
+    assert telemetry['rta_legacy_road_domain_conflict']
+    assert telemetry['rta_rear_guard_reason'] == 'physical_road_valid_legacy_domain_conflict'
+    assert telemetry['rta_safe_acceleration'] > 0.
+    # This is not an unconditional road-constraint relaxation.
+    guard.reset(env)
+    monkeypatch.setattr(guard.physical, '_road_geometry', lambda obj: RoadGeometry(0., -.5, 5.))
+    guard.filter_action(env, np.array([0., .5]))
+    assert not guard.active
+    # Domain correction is limited to the legacy low-speed fail-stop branch.
+    # It must not broaden physical takeover during normal high-speed driving.
+    guard.reset(env)
+    ego.velocity = np.array([10., 0.])
+    monkeypatch.setattr(guard.physical, '_road_geometry', lambda obj: RoadGeometry(0., 5., 5.))
+    guard.filter_action(env, np.array([0., .5]))
+    assert not guard.active
