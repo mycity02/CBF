@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cbf-rta"
+version = "0.1.0"
+description = "Two-dimensional control barrier functions for driving runtime assurance"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = ["numpy>=1.26,<2"]
+
+[project.optional-dependencies]
+test = ["pytest>=7"]
+
+[tool.setuptools.packages.find]
+include = ["cbf_rta*"]
